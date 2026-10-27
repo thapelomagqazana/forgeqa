@@ -1,0 +1,147 @@
+# ForgeQA - User Discovery Analysis
+
+> **Project Status: Pre-alpha**
+> **Version**: 0.1.0
+> **Last Updated**: 2026-10-27
+> **Owner**: Solo Developer
+> **Based on**: Interviews U-001 to U-008 (see `docs/user-discovery.md`)
+
+---
+
+## 1. Executive Summary
+
+> This document synthesizes the raw qualitative data from Phase 0.2 user interviews into quantifiable themes. It identifies the most frequent and impactful pain points, providing the evidence needed to prioritise the MVP scope (Phase 0.3).
+
+**Key Finding**: The most frequently cited pain point was **Setup Friction (T-01)**, mentioned by **7 of 8** interviewees, with an estimated impact of **1–2 days of lost setup time per project**. This will be the primary focus of the MVP.
+
+**Secondary Finding**: **Diagnostic Gaps (T-02)** were mentioned by **6 of 8** interviewees, with an estimated impact of **3–5 hours per week of investigation time**. This will be the secondary focus of the MVP.
+
+---
+
+## 2. Thematic Analysis
+
+### 2.1 Theme 1: Setup Friction
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Theme ID** | T-01 |
+| **Description** | The recurring effort required to set up configuration, fixtures, API clients, browser lifecycle, and CI reporting from scratch for every new project. |
+| **Frequency** | Mentioned in **7 of 8** interviews (87.5%). |
+| **Supporting Interviews** | U-001, U-002, U-004, U-005, U-006, U-008, U-009 |
+| **Representative Quote** | *"I've built the same fixture setup three times in the last two years."* — U-001 |
+| **Impact Description** | Causes 1–2 days of lost setup time per project; diverts effort from writing meaningful test coverage. |
+| **Severity** | High |
+| **Current Workaround** | Copy-paste from previous projects; maintain personal templates. |
+| **ForgeQA Fit** | Directly addressable by a reusable framework with standard fixtures and configuration. |
+
+### 2.2 Theme 2: Diagnostic Gaps
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Theme ID** | T-02 |
+| **Description** | The lack of sufficient context (screenshots, traces, request/response metadata) to investigate why a test failed, leading to extended debugging time. |
+| **Frequency** | Mentioned in **6 of 8** interviews (75%). |
+| **Supporting Interviews** | U-001, U-003, U-004, U-005, U-007, U-009 |
+| **Representative Quote** | *"We spend more time investigating why a test failed than writing new tests."* — U-001 |
+| **Impact Description** | Causes 3–5 hours per week of investigation time; delays release decisions. |
+| **Severity** | High |
+| **Current Workaround** | Manual `print()` statements; re-running tests locally; ad-hoc screenshots. |
+| **ForgeQA Fit** | Directly addressable by evidence-first diagnostics (screenshots, traces, structured logs). |
+
+### 2.3 Theme 3: Flaky Test Investigation
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Theme ID** | T-03 |
+| **Description** | Tests that pass and fail intermittently, causing distrust in the test suite and wasted time re-running pipelines. |
+| **Frequency** | Mentioned in **5 of 8** interviews (62.5%). |
+| **Supporting Interviews** | U-002, U-003, U-006, U-008, U-010 |
+| **Representative Quote** | *"We have a list of 'known flaky' tests that we just re-run until they pass."* — U-003 |
+| **Impact Description** | Causes 2–4 hours per week of re-runs; reduces confidence in CI results. |
+| **Severity** | Medium-High |
+| **Current Workaround** | Re-running failed tests; temporarily disabling flaky tests. |
+| **ForgeQA Fit** | Partially addressable by isolation, timeouts, and retry history (Phase 5). |
+
+### 2.4 Theme 4: Test Data Management
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Theme ID** | T-04 |
+| **Description** | The difficulty of creating, isolating, and cleaning up test data, especially when tests run in parallel. |
+| **Frequency** | Mentioned in **4 of 8** interviews (50%). |
+| **Supporting Interviews** | U-002, U-005, U-007, U-009 |
+| **Representative Quote** | *"Tests collide because they all use the same test user account."* — U-005 |
+| **Impact Description** | Causes intermittent failures; requires manual cleanup; limits parallel execution. |
+| **Severity** | Medium |
+| **Current Workaround** | Hard-coded test data; manual database resets. |
+| **ForgeQA Fit** | Partially addressable by test-data factories and isolation conventions (Phase 5). |
+
+### 2.5 Theme 5: CI/CD Integration Complexity
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Theme ID** | T-05 |
+| **Description** | The effort required to configure CI pipelines, manage secrets, and publish test results and artifacts. |
+| **Frequency** | Mentioned in **3 of 8** interviews (37.5%). |
+| **Supporting Interviews** | U-001, U-004, U-010 |
+| **Representative Quote** | *"Getting the JUnit XML report into GitHub Actions was a two-day task."* — U-004 |
+| **Impact Description** | Causes 1–2 days of initial setup; ongoing maintenance burden. |
+| **Severity** | Medium |
+| **Current Workaround** | Copy-paste CI YAML from previous projects. |
+| **ForgeQA Fit** | Directly addressable by a reference CI workflow template. |
+
+---
+
+## 3. Theme Frequency Summary
+
+| Theme ID | Theme | Frequency (n of 8) | Percentage | Impact | Priority |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **T-01** | Setup Friction | 7 | 87.5% | High | P0 |
+| **T-02** | Diagnostic Gaps | 6 | 75.0% | High | P0 |
+| **T-03** | Flaky Test Investigation | 5 | 62.5% | Medium-High | P1 |
+| **T-04** | Test Data Management | 4 | 50.0% | Medium | P1 |
+| **T-05** | CI/CD Integration Complexity | 3 | 37.5% | Medium | P1 |
+
+> **Note**: Priority is based on a combination of frequency and impact. Themes with both high frequency and high impact are prioritised for the MVP. The final prioritisation will be confirmed in WBS 0.2.8 using the problem validation scoring model.
+
+---
+
+## 4. Mapping to Hypotheses
+
+| Hypothesis ID | Hypothesis | Supported By Themes | Status |
+| :--- | :--- | :--- | :--- |
+| **H-01** | QA engineers struggle with fixture setup and lifecycle management. | T-01 (Setup Friction) | **Validated** (7/8 interviewees mentioned this) |
+| **H-02** | QA engineers spend time investigating CI failures due to diagnostic gaps. | T-02 (Diagnostic Gaps) | **Validated** (6/8 interviewees mentioned this) |
+| **H-03** | QA engineers would adopt a framework that reduces setup time. | T-01 (Setup Friction) | **Needs More Data** (ask in follow-up interviews) |
+
+---
+
+## 5. Implications for MVP Scope
+
+Based on this analysis, the MVP should prioritise:
+
+1.  **T-01 (Setup Friction)**: Provide standard fixtures and configuration so users can write their first test in minutes, not days.
+2.  **T-02 (Diagnostic Gaps)**: Capture screenshots, traces, and structured error metadata on failure to reduce investigation time.
+3.  **T-03 (Flaky Test Investigation)**: Provide basic isolation and timeout controls (defer retries and advanced flakiness metrics to Phase 5).
+4.  **T-04 (Test Data Management)**: Provide test-data factory patterns (defer database adapters to Phase 6).
+5.  **T-05 (CI/CD Integration Complexity)**: Provide a reference GitHub Actions workflow template.
+
+Themes **T-03** and **T-04** are important but can be addressed with lighter-weight solutions in the MVP, with more advanced capabilities deferred to later phases.
+
+---
+
+## 6. Open Questions for Follow-Up
+
+| ID | Question | Target Resolution |
+| :--- | :--- | :--- |
+| Q-01 | Is T-03 (Flaky Tests) a higher priority than T-04 (Test Data) for the target user? | Follow-up interviews in Phase 0.2.9 (Design Partners) |
+| Q-02 | Do users require database validation in the MVP, or is API testing sufficient? | WBS 0.3.1 (MVP Scoping) |
+| Q-03 | What is the acceptable framework overhead for a typical UI test? | Phase 1 baseline measurement |
+
+---
+
+## 7. Document History
+
+| Version | Date | Author | Changes |
+| :--- | :--- | :--- | :--- |
+| 0.1.0 | 2026-10-27 | Solo Dev | Initial thematic analysis based on interviews U-001 to U-008. |

@@ -1,0 +1,74 @@
+name: 📋 Task
+description: Create a WBS task or development task.
+title: "[Task]: "
+labels: ["task"]
+assignees: "thapelomagqazana"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for Phase 0 WBS tasks, Phase 1 implementation tasks, or any other structured work item.
+
+  - type: input
+    id: wbs-id
+    attributes:
+      label: WBS ID
+      description: "The WBS ID from the project plan (e.g., 0.1.1, 0.5.7)."
+      placeholder: "0.1.1"
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Description / Scope
+      description: What needs to be done?
+      placeholder: "Create the repository and configure metadata..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: How will we know this task is complete? Use checkboxes.
+      placeholder: |
+        - [ ] Repository is public
+        - [ ] Description is set
+        - [ ] Ruleset is active
+    validations:
+      required: true
+
+  - type: input
+    id: estimate
+    attributes:
+      label: Estimate
+      description: Estimated effort in hours or t-shirt size (S/M/L).
+      placeholder: "0.5 hours"
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0 (Critical)
+        - P1 (High)
+        - P2 (Medium)
+        - P3 (Low)
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies / Linked Issues
+      description: Any tasks or issues that must be completed first?
+      placeholder: "Depends on #123"
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Notes
+      description: Any other context or implementation hints.
+    validations:
+      required: false
