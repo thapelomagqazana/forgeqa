@@ -218,3 +218,179 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# =============================================================================
+# ForgeQA - .gitignore
+# =============================================================================
+# This file ensures that only source code and documentation are tracked.
+# Generated files, secrets, and environment-specific configuration are ignored.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python Bytecode & Interpreter
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# -----------------------------------------------------------------------------
+# Virtual Environments
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# -----------------------------------------------------------------------------
+# Testing & Coverage (Pytest)
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# -----------------------------------------------------------------------------
+# Type Checking & Linting (MyPy, Ruff, Pyright)
+# -----------------------------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyre/
+.pytype/
+
+# -----------------------------------------------------------------------------
+# Build & Packaging (Hatchling, Build)
+# -----------------------------------------------------------------------------
+build/
+dist/
+*.egg-info/
+*.whl
+*.tar.gz
+*.zip
+.eggs/
+
+# -----------------------------------------------------------------------------
+# Playwright & Browser Automation
+# -----------------------------------------------------------------------------
+# Playwright installs browsers in a cache directory (usually ~/.cache/ms-playwright)
+# We don't track any browser binaries or test artifacts.
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+# Playwright traces and screenshots generated during local runs
+traces/
+screenshots/
+videos/
+
+# -----------------------------------------------------------------------------
+# ForgeQA Framework Artifacts
+# -----------------------------------------------------------------------------
+# The default artifacts directory defined in forgeqa.toml
+artifacts/
+# Any run-specific output directories
+run-*/
+# JUnit XML and JSON reports
+*.xml
+results.json
+summary.txt
+*.jsonl
+
+# -----------------------------------------------------------------------------
+# Environment & Secrets
+# -----------------------------------------------------------------------------
+# Never commit actual environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+# Local configuration overrides
+forgeqa.local.toml
+
+# -----------------------------------------------------------------------------
+# Reference Application Specific
+# -----------------------------------------------------------------------------
+# In-memory database files or local logs from the reference app
+examples/reference-app/data/
+examples/reference-app/logs/
+*.sqlite
+*.db
+*.log
+
+# -----------------------------------------------------------------------------
+# IDE & Editor Files
+# -----------------------------------------------------------------------------
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+# Vim
+*.swp
+*.swo
+# Emacs
+*~
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Docker & Local Infrastructure
+# -----------------------------------------------------------------------------
+# Docker Compose overrides and local volumes
+docker-compose.override.yml
+.docker/
+*.pid
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints
+# Logs
+logs/
+*.log
+# Temporary files
+*.tmp
+*.temp
+.cache/

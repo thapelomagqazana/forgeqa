@@ -1,0 +1,21 @@
+title = "ForgeQA Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for synthetic test secrets and documentation examples"
+paths = [
+    # Test files may contain synthetic secrets for redaction testing
+    '''tests/.*''',
+    # Documentation may contain example secrets (clearly marked as fake)
+    '''docs/.*''',
+    # Pre-commit config itself
+    '''.pre-commit-config.yaml''',
+]
+regexes = [
+    # Allow clearly fake secrets used in documentation
+    '''example-secret-value''',
+    '''fake-token-for-testing''',
+    '''canary-secret-.*''',
+]
