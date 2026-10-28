@@ -194,6 +194,11 @@ verify:
 	@echo ""
 	@echo "Wheel verification passed."
 
+.PHONY: verify-build
+verify-build:
+	@echo "Verifying build artifact contents..."
+	./scripts/verify_build.sh
+
 # =============================================================================
 # Clean
 # =============================================================================
@@ -255,7 +260,7 @@ hooks-update:
 # CI (full pipeline)
 # =============================================================================
 .PHONY: ci
-ci: check adr test build verify verify-deps
+ci: check adr test build verify verify-deps verify-build
 	@echo ""
 	@echo "Full CI pipeline passed."
 

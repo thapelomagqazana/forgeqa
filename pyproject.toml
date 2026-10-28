@@ -134,10 +134,47 @@ Changelog = "https://github.com/thapelomagqazana/forgeqa/blob/main/CHANGELOG.md"
 # =============================================================================
 # Hatchling Build Configuration
 # =============================================================================
+# Content contracts for the built artifacts (WBS 1.1.4; enforced by
+# scripts/verify_build.sh and tests/unit/test_build_config.py):
+#
+#   WHEEL  (forgeqa-X.Y.Z-py3-none-any.whl)  MUST contain:
+#     - forgeqa/__init__.py                    (importable package)
+#     - forgeqa-X.Y.Z.dist-info/licenses/LICENSE  (bundled via [project].license)
+#     - forgeqa-X.Y.Z.dist-info/METADATA          (auto-generated)
+#     - forgeqa-X.Y.Z.dist-info/WHEEL             (auto-generated)
+#   WHEEL MUST NOT contain:
+#     tests/, docs/, examples/, scripts/, *.egg-info/, __pycache__/, *.pyc
+#
+#   SDIST  (forgeqa-X.Y.Z.tar.gz)  MUST contain:
+#     - src/forgeqa/  (source tree)
+#     - tests/        (so downstream can test from sdist)
+#     - docs/         (so downstream can read docs offline)
+#     - README.md, LICENSE, pyproject.toml
+#   SDIST MUST NOT contain:
+#     dist/, build/, .venv/, *.egg-info/, __pycache__/, *.pyc
+# =============================================================================
+
 [tool.hatch.build.targets.wheel]
+# Ship only the package. `packages` narrows selection to src/forgeqa, so
+# hatchling already excludes tests/, docs/, etc. The explicit `exclude`
+# below makes the invariant auditable here and robust against a future
+# change to `packages` (e.g. adding src/forgeqa_tools should not silently
+# broaden the selection to include repo-only directories).
 packages = ["src/forgeqa"]
+exclude = [
+    "tests",
+    "docs",
+    "examples",
+    "scripts",
+    "*.egg-info",
+    "**/__pycache__",
+    "**/*.pyc",
+]
 
 [tool.hatch.build.targets.sdist]
+# Ship the source tree so downstream consumers can build and test from
+# sdist. Include the files that make the sdist self-sufficient; exclude
+# build artifacts so a local build does not leak state into the archive.
 include = [
     "/src",
     "/tests",
@@ -145,6 +182,21 @@ include = [
     "/README.md",
     "/LICENSE",
     "/pyproject.toml",
+]
+exclude = [
+    "/dist",
+    "/build",
+    "/.venv",
+    "/.pytest_cache",
+    "/.mypy_cache",
+    "/.ruff_cache",
+    "/htmlcov",
+    "/**/*.egg-info",
+    "/**/__pycache__",
+    "/**/*.pyc",
+    "/.git",
+    "/.github",
+    "/artifacts",
 ]
 
 # =============================================================================
