@@ -9,3 +9,4 @@
 | [002](ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md) | Resolve package version at import time via importlib.metadata and keep top-level imports dependency-free | Accepted | 2026-10-28 |
 | [003](ADR-003-verify-optional-dependency-groups-via-an-isolated-venv-script-in-ci.md) | Verify optional dependency groups via an isolated-venv script in CI | Accepted | 2026-10-28 |
 | [004](ADR-004-verify-built-artifacts-contain-exactly-the-intended-files-using-isolated-inspection-in-ci.md) | Verify built artifacts contain exactly the intended files, using isolated inspection in CI | Accepted | 2026-10-28 |
+| [005](ADR-005-verify-installed-wheel-works-outside-the-source-checkout-using-an-isolated-venv-and-a-source-tree-free-cwd.md) | Verify installed wheel works outside the source checkout using an isolated venv and a source-tree-free cwd | Accepted | 2026-10-28 |
