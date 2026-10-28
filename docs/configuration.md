@@ -2,18 +2,151 @@
 
 ForgeQA reads a single TOML file, `forgeqa.toml`, from the working
 directory. This document is the reference for every field, its type,
-its default, and its validation rule.
+its default, and its validation rule, plus how the loader finds and
+parses the file.
 
 The schema is enforced by `src/forgeqa/config/models.py` (see
-[ADR-008](adr/ADR-008-pydantic-config-hierarchy.md) for the design
-decision). The model is a Pydantic v2 hierarchy — invalid values fail
-at parse time with a message that names the field and (for `Literal`
-fields) lists the valid values.
+[ADR-007](adr/ADR-007-pydantic-config-hierarchy.md) for the design
+decision). The loader is `src/forgeqa/config/loader.py` (see
+[ADR-008](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) for its
+design decision). The model is a Pydantic v2 hierarchy — invalid values
+fail at parse time with a message that names the field and (for
+`Literal` fields) lists the valid values.
 
-**Status:** the schema is implemented (WBS 1.2.1). File loading is
-Phase 1 (WBS 1.2.2) — until then, `ForgeQAConfig()` is constructible
-only from Python, not from `forgeqa.toml`. This document describes the
-target behaviour the schema defines; the loader will realise it.
+**Status:** both the schema (WBS 1.2.1) and the loader (WBS 1.2.2) are
+implemented. This document describes the actual behaviour, not a
+target.
+
+---
+
+## Loading configuration
+
+You do not read `forgeqa.toml` yourself. You call one function:
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config()
+```
+
+That is the whole API. `load_config` searches the current working
+directory for `forgeqa.toml`, parses it, validates it against the
+schema, and returns a fully-defaulted `ForgeQAConfig`. If no file is
+present, it returns the default config — a fully-usable configuration
+with sensible defaults.
+
+### Search order
+
+1. If you pass an explicit `path`, that path is used. If the file does
+   not exist, `ForgeQAConfigError` is raised (an explicit path is a
+   caller's choice; a missing file is a caller's bug, not a reason to
+   use defaults).
+2. Otherwise, `load_config` searches the current working directory for
+   `forgeqa.toml`. If found, it is used.
+3. Otherwise, the default config is returned.
+
+The search does not walk up the directory tree. If you want a config
+file from a specific directory, pass its path explicitly. (A future
+Phase 1 feature may add upward search; it is not in this version.)
+
+### Errors
+
+All load failures raise `ForgeQAConfigError`:
+
+```python
+from forgeqa.config import ForgeQAConfigError, load_config
+
+try:
+    cfg = load_config()
+except ForgeQAConfigError as exc:
+    print(f"Configuration error: {exc}")
+    # exc.path is the file that failed, if a file was involved.
+    raise
+```
+
+`ForgeQAConfigError` covers:
+
+- **Malformed TOML.** The file exists but is not valid TOML. The
+  message includes the file path and (when `tomllib` provides it) the
+  line and column.
+- **Invalid values.** The file parses as TOML but does not produce a
+  valid `ForgeQAConfig` (e.g. `browser_name = "safari"`,
+  `timeout_ms = -1`, an unknown key). The message includes the file
+  path and the field-level error from Pydantic.
+- **Missing explicit path.** You passed `path=...` and the file does
+  not exist.
+- **Unreadable file.** The file exists but cannot be read (e.g.
+  permission denied).
+
+The original exception (`TOMLDecodeError`, `ValidationError`,
+`OSError`, or `UnicodeDecodeError`) is preserved as `exc.__cause__`
+for debugging.
+
+### Determinism
+
+Each call to `load_config` reads the file fresh. The loader does not
+cache. Two calls on the same file produce equal configs; two calls on
+a file that was edited in between produce different configs. A
+developer who edits `forgeqa.toml` and calls `load_config` again sees
+the new values. (Caching was rejected because staleness is a worse
+failure mode than a ~1 ms file read.)
+
+### What is not configurable (yet)
+
+- **Config file path via environment variable** (`FORGEA_CONFIG_PATH`).
+  Phase 1 follow-up.
+- **Environment overlays** (`FORGEA_ENV=ci` picking
+  `forgeqa.ci.toml`). Phase 1 follow-up.
+- **Per-field environment overrides** (`FORGEA_BROWSER_HEADLESS=false`).
+  Phase 1 follow-up.
+- **Upward directory search.** Phase 1 follow-up.
+- **Multiple config files merged.** Phase 1 follow-up.
+
+Each of these is additive: they will add new functions or extend
+`load_config` with new arguments, not change its current signature.
+
+### Examples
+
+Load from the current directory (or defaults if no file is present):
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config()
+```
+
+Load from an explicit path:
+
+```python
+from pathlib import Path
+from forgeqa.config import load_config
+
+cfg = load_config(Path("configs/ci.toml"))
+```
+
+Find the config file without loading it:
+
+```python
+from forgeqa.config import find_config_path
+
+path = find_config_path()  # absolute Path, or None
+if path is not None:
+    print(f"Config file found at: {path}")
+else:
+    print("No config file; defaults will be used")
+```
+
+Handle an error:
+
+```python
+from forgeqa.config import ForgeQAConfigError, load_config
+
+try:
+    cfg = load_config()
+except ForgeQAConfigError as exc:
+    print(f"Could not load configuration: {exc}")
+    raise SystemExit(1)
+```
 
 ---
 
@@ -139,6 +272,11 @@ timout_ms
   Extra inputs are not permitted [type=extra_forbidden, input_value=10000, input_type=int]
 ```
 
+When these errors occur during `load_config` (i.e. from a real
+`forgeqa.toml` file), they are wrapped in `ForgeQAConfigError` with the
+file path prepended — see [Loading configuration](#loading-configuration)
+above.
+
 The full set of validation rules is tested by
 `tests/unit/config/test_models.py` (see the "Negative cases" section
 there).
@@ -225,7 +363,7 @@ error by setting `log_level = "ERROR"`.
 `TRACE` is not a Python `logging` level. Some third-party logging
 libraries (e.g. `loguru`) provide one; Python's stdlib does not. ForgeQA
 uses the stdlib `logging` module (a future decision may change this;
-see ADR-008's reconsideration trigger). Until then, `DEBUG` is the
+see ADR-007's reconsideration trigger). Until then, `DEBUG` is the
 most verbose level available, and it is what `TRACE` would map to in
 any case.
 
@@ -340,34 +478,58 @@ public-api doc.
 
 ---
 
-## Validation is not loading
+## Schema and loader are separate concerns
 
-The schema (this document) and the loader (Phase 1) are separate
-concerns:
+The schema and the loader are two modules with distinct responsibilities:
 
-- **The schema** defines what a valid config looks like. It is
-  enforced by Pydantic v2 and tested by
-  `tests/unit/config/test_models.py`. It runs in ~50 ms and does not
-  read any files.
-- **The loader** (Phase 1, WBS 1.2.2) reads `forgeqa.toml`, applies
-  environment overlays (e.g. `FORGEA_ENV=ci`), resolves secrets, and
-  produces a `ForgeQAConfig`. It is a separate module with its own
-  tests.
+- **The schema** (`src/forgeqa/config/models.py`, ADR-007) defines what
+  a valid config looks like. It is enforced by Pydantic v2 and tested
+  by `tests/unit/config/test_models.py`. It runs in ~50 ms and does
+  not read any files.
+- **The loader** (`src/forgeqa/config/loader.py`, ADR-008) reads
+  `forgeqa.toml`, parses it with `tomllib`, and constructs a
+  `ForgeQAConfig`. Tested by `tests/unit/config/test_loader.py`.
 
 Splitting them means a schema change is testable without I/O, and a
 loader change is testable without re-testing the schema. It also means
 a consumer who wants to construct a config in Python (e.g. in a test
-fixture) can do so without touching a file.
+fixture) can do so without touching a file:
+
+```python
+from forgeqa.config import BrowserConfig, ForgeQAConfig
+
+# No file involved. This is a valid, fully-typed config.
+cfg = ForgeQAConfig(browser=BrowserConfig(browser_name="firefox"))
+```
+
+A consumer who wants to load from a file uses `load_config`:
+
+```python
+from forgeqa.config import load_config
+
+# Reads forgeqa.toml from cwd (or returns defaults if absent).
+cfg = load_config()
+```
+
+Both paths produce the same `ForgeQAConfig` type. The loader is a
+convenience for the common case; constructing from Python is the
+power-user path.
 
 ---
 
 ## See also
 
 - [`docs/engineering-standards.md`](engineering-standards.md) §5.1 —
-  contributor-facing Pydantic conventions.
-- [`docs/adr/ADR-008`](adr/ADR-008-pydantic-config-hierarchy.md) —
-  the design decision.
+  contributor-facing Pydantic and loader conventions.
+- [`docs/adr/ADR-007`](adr/ADR-007-pydantic-config-hierarchy.md) —
+  the schema design decision.
+- [`docs/adr/ADR-008`](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) —
+  the loader design decision.
 - [`docs/public-api.md`](public-api.md) — the package's public API
   contract.
-- `tests/unit/config/test_models.py` — the executable contract.
+- `tests/unit/config/test_models.py` — the schema's executable
+  contract.
+- `tests/unit/config/test_loader.py` — the loader's executable
+  contract.
 - `src/forgeqa/config/models.py` — the schema source.
+- `src/forgeqa/config/loader.py` — the loader source.
