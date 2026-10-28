@@ -6,3 +6,4 @@
 | ADR | Title | Status | Date |
 | :--- | :--- | :--- | :--- |
 | [001](ADR-001-adopt-mit-license-file-and-pep-621-compliant-package-metadata.md) | Adopt MIT license file and PEP 621-compliant package metadata | Accepted | 2026-10-28 |
+| [002](ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md) | Resolve package version at import time via importlib.metadata and keep top-level imports dependency-free | Accepted | 2026-10-28 |
