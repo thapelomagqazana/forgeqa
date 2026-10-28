@@ -63,8 +63,8 @@ api = [
 dev = [
     "build>=1.2",
     "twine>=5.1",
-    "mypy",
-    "ruff",
+    "mypy==1.11.2",
+    "ruff==0.17.3",
     "pytest-cov",
     "coverage[toml]", # Required for pytest-cov to read pyproject.toml config
     "pre-commit",
@@ -75,8 +75,8 @@ all = [
     "httpx>=0.27",
     "build>=1.2",
     "twine>=5.1",
-    "mypy",
-    "ruff",
+    "mypy==1.11.2",
+    "ruff==0.17.3",
     "pytest-cov",
     "coverage[toml]",
     "pre-commit",
