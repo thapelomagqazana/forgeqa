@@ -1,0 +1,471 @@
+"""Unit tests for the ForgeQA configuration schema.
+
+These tests cover WBS 1.2.1:
+
+* :class:`ForgeQAConfig` is importable and instantiable with defaults.
+* ``browser_name`` rejects invalid values (e.g. ``"safari"``) with a
+  clear error.
+* ``base_url`` rejects invalid URLs.
+* ``timeout_ms`` rejects negative values.
+* All sub-models have documented defaults.
+
+The tests also cover edge cases (boundary values), corner cases
+(unknown keys, nested models), and non-functional properties
+(immutability, serialisation round-trip, JSON schema shape) that the
+WBS's "strictly typed and fully composable" KPI implies.
+
+The tests are **schema tests**, not loader tests. Loading a
+``forgeqa.toml`` file into ``ForgeQAConfig`` is a separate concern
+(Phase 1); this file only tests the models.
+
+Run only these tests:
+
+    pytest tests/unit/config/test_models.py -v
+    # or
+    make verify-config
+"""
+
+from __future__ import annotations
+
+import json
+from typing import get_args
+
+import pytest
+from pydantic import ValidationError
+
+from forgeqa.config import (
+    APIConfig,
+    BrowserConfig,
+    BrowserName,
+    DiagnosticsConfig,
+    ForgeQAConfig,
+    GeneralConfig,
+    LogLevel,
+    ReportingConfig,
+)
+
+pytestmark = pytest.mark.unit
+
+
+# =============================================================================
+# Positive cases — defaults and happy-path construction
+# =============================================================================
+
+
+def test_forgeqa_config_instantiable_with_defaults() -> None:
+    """Given no arguments, when constructing ``ForgeQAConfig``, then it succeeds with all defaults.
+
+    The WBS acceptance criterion "ForgeQAConfig is importable and
+    instantiable with defaults". This is the most basic test — if it
+    fails, every consumer's first experience with the library is a
+    ``ValidationError``.
+    """
+    cfg = ForgeQAConfig()
+    assert isinstance(cfg, ForgeQAConfig)
+    # Every sub-model is present and correctly typed.
+    assert isinstance(cfg.general, GeneralConfig)
+    assert isinstance(cfg.browser, BrowserConfig)
+    assert isinstance(cfg.api, APIConfig)
+    assert isinstance(cfg.diagnostics, DiagnosticsConfig)
+    assert isinstance(cfg.reporting, ReportingConfig)
+
+
+def test_general_config_defaults() -> None:
+    """Given no arguments, when constructing ``GeneralConfig``, then documented defaults apply.
+
+    Guards against a future change to a default. The defaults are
+    documented in ``docs/configuration.md``; if they change there,
+    this test and the doc are updated together.
+    """
+    cfg = GeneralConfig()
+    assert cfg.environment == "local"
+    assert cfg.artifacts_dir == "artifacts"
+    assert cfg.log_level == "INFO"
+
+
+def test_browser_config_defaults() -> None:
+    """Given no arguments, when constructing ``BrowserConfig``, then documented defaults apply.
+
+    ``base_url`` is compared by ``host``/``scheme`` rather than by string
+    equality because Pydantic's ``AnyHttpUrl`` normalises the trailing
+    slash (``http://localhost:8000`` becomes ``http://localhost:8000/``).
+    Comparing the raw string would be brittle across Pydantic minor
+    versions.
+    """
+    cfg = BrowserConfig()
+    assert cfg.browser_name == "chromium"
+    assert cfg.headless is True
+    assert cfg.base_url.host == "localhost"
+    assert cfg.base_url.port == 8000
+    assert cfg.base_url.scheme == "http"
+    assert cfg.timeout_ms == 10_000
+
+
+def test_api_config_defaults() -> None:
+    """Given no arguments, when constructing ``APIConfig``, then documented defaults apply."""
+    cfg = APIConfig()
+    assert cfg.base_url.host == "localhost"
+    assert cfg.base_url.port == 8000
+    assert str(cfg.base_url.path).rstrip("/") == "/api"
+    assert cfg.timeout_seconds == 10
+
+
+def test_diagnostics_config_defaults() -> None:
+    """Given no arguments, when constructing ``DiagnosticsConfig``, then all captures are enabled.
+
+    "Capture nothing by default" is the wrong default for a test
+    framework whose purpose is evidence. This test guards the
+    evidence-first default.
+    """
+    cfg = DiagnosticsConfig()
+    assert cfg.screenshots is True
+    assert cfg.traces is True
+    assert cfg.console_logs is True
+
+
+def test_reporting_config_defaults() -> None:
+    """Given no arguments, when constructing ``ReportingConfig``, then both reports are enabled.
+
+    JUnit XML is the CI-native format; structured JSON is the durable
+    format. Both on by default.
+    """
+    cfg = ReportingConfig()
+    assert cfg.junit_xml is True
+    assert cfg.json_report is True
+
+
+def test_valid_browser_names_accepted() -> None:
+    """Given each valid browser name, when constructing ``BrowserConfig``, then it succeeds.
+
+    The parametrisation is derived from ``get_args(BrowserName)``, so
+    adding a new literal to ``BrowserName`` automatically extends the
+    test. A contributor adding ``"edge"`` to the Literal does not have
+    to remember to update this test.
+    """
+    for name in get_args(BrowserName):
+        cfg = BrowserConfig(browser_name=name)
+        assert cfg.browser_name == name
+
+
+def test_valid_log_levels_accepted() -> None:
+    """Given each valid log level, when constructing ``GeneralConfig``, then it succeeds.
+
+    Same parametrisation-from-``get_args`` pattern as the browser test.
+    """
+    for level in get_args(LogLevel):
+        cfg = GeneralConfig(log_level=level)
+        assert cfg.log_level == level
+
+
+# =============================================================================
+# Negative cases — invalid values are rejected with clear errors
+# =============================================================================
+
+
+def test_invalid_browser_name_rejected() -> None:
+    """Given ``browser_name='safari'``, when constructing ``BrowserConfig``, then it raises ``ValidationError``.
+
+    The WBS acceptance criterion "browser_name rejects invalid values
+    (e.g., 'safari') with a clear error". The test asserts both that it
+    raises and that the error names the field and (via Pydantic's
+    Literal handling) lists the valid values.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        BrowserConfig(browser_name="safari")  # type: ignore[arg-type]
+    error = exc_info.value.errors()[0]
+    assert error["loc"] == ("browser_name",)
+    # Pydantic's Literal error message mentions "Input should be" and the
+    # valid values. Asserting on the *concept* rather than the exact
+    # wording keeps the test stable across Pydantic minor versions.
+    message = error["msg"].lower()
+    assert "input should be" in message
+    # The valid values should appear somewhere in the error representation
+    # (Pydantic renders them as a comma-separated list in the error).
+    rendered = str(exc_info.value).lower()
+    for valid in get_args(BrowserName):
+        assert valid.lower() in rendered, (
+            f"Valid browser {valid!r} not mentioned in the error message: {exc_info.value}"
+        )
+
+
+@pytest.mark.parametrize("invalid_url", ["not-a-url", "http://", "ftp://example.com", ""])
+def test_invalid_base_url_rejected(invalid_url: str) -> None:
+    """Given an invalid URL, when constructing a config, then it raises ``ValidationError``.
+
+    The WBS acceptance criterion "base_url rejects invalid URLs". The
+    parametrisation covers four classes of invalid URL:
+
+    * ``"not-a-url"`` — no scheme, no netloc.
+    * ``"http://"`` — scheme but no host.
+    * ``"ftp://example.com"`` — wrong scheme (``AnyHttpUrl`` accepts
+      only http/https).
+    * ``""`` — empty string.
+
+    Both ``BrowserConfig.base_url`` and ``APIConfig.base_url`` are
+    covered because they are independent fields with the same type.
+    """
+    with pytest.raises(ValidationError):
+        BrowserConfig(base_url=invalid_url)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        APIConfig(base_url=invalid_url)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid_timeout", [0, -1, -10_000])
+def test_invalid_browser_timeout_rejected(invalid_timeout: int) -> None:
+    """Given a non-positive timeout, when constructing ``BrowserConfig``, then it raises ``ValidationError``.
+
+    The WBS acceptance criterion "timeout_ms rejects negative values".
+    The test also rejects ``0``, which is technically non-negative but
+    is not a valid timeout (a zero-millisecond timeout would fail
+    immediately). ``PositiveInt`` is ``int`` with ``gt=0`` — the
+    semantic is "strictly positive", not "non-negative".
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        BrowserConfig(timeout_ms=invalid_timeout)
+    error = exc_info.value.errors()[0]
+    assert error["loc"] == ("timeout_ms",)
+    assert "greater than 0" in error["msg"].lower()
+
+
+@pytest.mark.parametrize("invalid_timeout", [0, -1])
+def test_invalid_api_timeout_rejected(invalid_timeout: int) -> None:
+    """Given a non-positive timeout, when constructing ``APIConfig``, then it raises ``ValidationError``.
+
+    Same rule as the browser timeout, applied to ``timeout_seconds``.
+    """
+    with pytest.raises(ValidationError):
+        APIConfig(timeout_seconds=invalid_timeout)
+
+
+def test_invalid_log_level_rejected() -> None:
+    """Given ``log_level='TRACE'``, when constructing ``GeneralConfig``, then it raises ``ValidationError``.
+
+    ``TRACE`` is not in :data:`LogLevel`. This catches a common mistake
+    from users coming from other logging frameworks that have a TRACE
+    level.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        GeneralConfig(log_level="TRACE")  # type: ignore[arg-type]
+    error = exc_info.value.errors()[0]
+    assert error["loc"] == ("log_level",)
+
+
+# =============================================================================
+# Edge cases — boundary values and type coercion
+# =============================================================================
+
+
+def test_timeout_boundary_minimum() -> None:
+    """Given ``timeout_ms=1``, when constructing ``BrowserConfig``, then it succeeds.
+
+    The boundary of ``PositiveInt``: 1 is the smallest valid value.
+    Guards against a future change that turns ``PositiveInt`` into a
+    strict ``gt=100`` without a corresponding change to the docs.
+    """
+    cfg = BrowserConfig(timeout_ms=1)
+    assert cfg.timeout_ms == 1
+
+
+def test_timeout_boundary_api_minimum() -> None:
+    """Given ``timeout_seconds=1``, when constructing ``APIConfig``, then it succeeds.
+
+    Same boundary as the browser timeout, applied to ``timeout_seconds``.
+    """
+    cfg = APIConfig(timeout_seconds=1)
+    assert cfg.timeout_seconds == 1
+
+
+def test_bool_from_common_string_forms_accepted() -> None:
+    """Given a well-known boolean string, when constructing ``BrowserConfig``, then it coerces.
+
+    Pydantic v2 accepts a specific set of string forms for ``bool``
+    fields, matching Pydantic v1: ``"true"/"false"``, ``"yes"/"no"``,
+    ``"on"/"off"``, and ``"1"/"0"`` (case-insensitive). This is a
+    useful convenience for hand-edited TOML, where users may write
+    ``headless = "yes"`` thinking of the natural-language form.
+
+    This test pins the accepted set so a future change to Pydantic's
+    coercion rules (e.g. dropping ``"yes"``) fails here rather than
+    silently changing what a user can write in ``forgeqa.toml``.
+    """
+    truthy_forms = ("true", "yes", "on", "1", "TRUE", "YES", "True", "Yes")
+    for form in truthy_forms:
+        cfg = BrowserConfig(headless=form)  # type: ignore[arg-type]
+        assert cfg.headless is True, f"Expected {form!r} to coerce to True"
+
+    falsy_forms = ("false", "no", "off", "0", "FALSE", "NO", "False", "No")
+    for form in falsy_forms:
+        cfg = BrowserConfig(headless=form)  # type: ignore[arg-type]
+        assert cfg.headless is False, f"Expected {form!r} to coerce to False"
+
+
+def test_ambiguous_bool_string_rejected() -> None:
+    """Given ``headless='maybe'``, when constructing ``BrowserConfig``, then it raises ``ValidationError``.
+
+    Pydantic v2's ``bool`` validator accepts a fixed set of string
+    forms (see :func:`test_bool_from_common_string_forms_accepted`).
+    ``"maybe"`` is not among them, so it fails at parse time with a
+    clear error. This is the actual "does not coerce arbitrary
+    strings" behaviour: coercion is bounded, not absent.
+    """
+    with pytest.raises(ValidationError):
+        BrowserConfig(headless="maybe")  # type: ignore[arg-type]
+
+
+def test_extra_field_rejected() -> None:
+    """Given an unknown key, when constructing any model, then it raises ``ValidationError``.
+
+    ``model_config['extra'] = 'forbid'`` is what makes a typo in a
+    ``forgeqa.toml`` file (e.g. ``timout_ms``) fail at parse time rather
+    than silently using the default. This is the "unknown keys are
+    rejected" design principle.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        BrowserConfig(timout_ms=10_000)  # type: ignore[call-arg]
+    # The error should mention the offending key and (via Pydantic's
+    # "extra_forbidden" error) that it is not allowed.
+    assert "timout_ms" in str(exc_info.value)
+
+
+def test_extra_field_rejected_at_root() -> None:
+    """Given an unknown key at the root, when constructing ``ForgeQAConfig``, then it raises ``ValidationError``.
+
+    Same rule as the sub-model case, at the root level. A typo like
+    ``[browsr]`` in the TOML (a section that would be passed as
+    ``browsr={...}``) fails, instead of the browser config silently
+    using defaults.
+    """
+    with pytest.raises(ValidationError):
+        ForgeQAConfig(browsr={"browser_name": "chromium"})  # type: ignore[call-arg]
+
+
+# =============================================================================
+# Corner cases — composition and nested validation
+# =============================================================================
+
+
+def test_nested_sub_model_validation() -> None:
+    """Given a dict for a sub-model, when constructing ``ForgeQAConfig``, then nested validation fires.
+
+    Pydantic's structural composition means ``ForgeQAConfig(browser={"browser_name": "safari"})``
+    validates the nested ``BrowserConfig`` even though the caller passed
+    a dict. The error location should point at ``browser.browser_name``
+    (not just ``browser_name``), which is what makes the error
+    actionable in a nested config.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        ForgeQAConfig(browser={"browser_name": "safari"})  # type: ignore[arg-type]
+    error = exc_info.value.errors()[0]
+    assert error["loc"] == ("browser", "browser_name")
+
+
+def test_partial_override_uses_defaults_for_unspecified() -> None:
+    """Given a partial override, when constructing ``ForgeQAConfig``, then unspecified fields use defaults.
+
+    ``ForgeQAConfig(browser={"browser_name": "firefox"})`` should keep
+    ``timeout_ms`` at its default (10 000) and ``headless`` at True.
+    This is the "sensible defaults" principle applied through
+    composition.
+    """
+    cfg = ForgeQAConfig(browser={"browser_name": "firefox"})  # type: ignore[arg-type]
+    assert cfg.browser.browser_name == "firefox"
+    assert cfg.browser.headless is True  # default preserved
+    assert cfg.browser.timeout_ms == 10_000  # default preserved
+    # Other sub-models are also at defaults.
+    assert cfg.api.timeout_seconds == 10
+    assert cfg.general.environment == "local"
+
+
+def test_full_config_round_trip_via_dict() -> None:
+    """Given a full config, when serialised to dict and re-constructed, then it is equal.
+
+    Round-trip through ``model_dump()`` → ``ForgeQAConfig(**dumped)`` is
+    the shape a future TOML loader will use (parse TOML → dict → model).
+    If a field is not round-trippable (e.g. a custom validator that
+    rejects its own output), this test catches it.
+    """
+    original = ForgeQAConfig(
+        general={"environment": "ci", "artifacts_dir": "/tmp/artifacts", "log_level": "DEBUG"},  # type: ignore[arg-type]
+        browser={"browser_name": "firefox", "headless": False, "timeout_ms": 30_000},  # type: ignore[arg-type]
+        api={"timeout_seconds": 30},  # type: ignore[arg-type]
+        diagnostics={"screenshots": False},  # type: ignore[arg-type]
+        reporting={"junit_xml": False},  # type: ignore[arg-type]
+    )
+    dumped = original.model_dump(mode="json")
+    restored = ForgeQAConfig(**dumped)
+    assert restored == original
+
+
+# =============================================================================
+# Non-functional cases — immutability, JSON schema, cross-field
+# =============================================================================
+
+
+def test_config_is_immutable() -> None:
+    """Given a constructed config, when I try to mutate a field, then it raises ``ValidationError``.
+
+    ``model_config['frozen'] = True`` means assignment raises. A config
+    object is a value, not a mutable bag; passing it around cannot
+    accidentally mutate it.
+    """
+    cfg = ForgeQAConfig()
+    with pytest.raises(ValidationError):
+        cfg.general.environment = "production"  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        cfg.browser.browser_name = "firefox"  # type: ignore[misc]
+
+
+def test_sub_model_is_immutable() -> None:
+    """Given a sub-model, when I try to mutate a field, then it raises ``ValidationError``.
+
+    Same rule as the root model, at the sub-model level. A consumer
+    who keeps a reference to ``cfg.browser`` cannot mutate it.
+    """
+    cfg = BrowserConfig()
+    with pytest.raises(ValidationError):
+        cfg.timeout_ms = 30_000  # type: ignore[misc]
+
+
+def test_json_schema_is_generated() -> None:
+    """Given ``ForgeQAConfig``, when I ask for its JSON schema, then it is valid JSON with all five sub-models.
+
+    A JSON schema is what a future config-validator tool (or an IDE
+    plugin) would use for autocomplete and validation. The test asserts
+    the schema is generated and contains the five sub-models as
+    ``properties``. It does not assert the exact schema — Pydantic
+    minor versions evolve the schema shape (e.g. adding
+    ``$defs``, changing ``anyOf`` order) without it being a regression.
+    """
+    schema = ForgeQAConfig.model_json_schema()
+    assert isinstance(schema, dict)
+    assert "properties" in schema
+    for key in ("general", "browser", "api", "diagnostics", "reporting"):
+        assert key in schema["properties"], (
+            f"Sub-model {key!r} missing from JSON schema properties: {list(schema['properties'])}"
+        )
+    # Schema must be JSON-serialisable (the whole point of "JSON schema").
+    json.dumps(schema)
+
+
+def test_str_strip_whitespace_applied() -> None:
+    """Given whitespace around a string, when constructing a config, then it is stripped.
+
+    ``str_strip_whitespace=True`` prevents a class of "why doesn't my
+    URL work" bugs from hand-edited TOML with trailing spaces. This is
+    a convenience, not a correctness rule, but it is part of the
+    documented behaviour in ``docs/configuration.md``.
+    """
+    cfg = GeneralConfig(environment="  local  ")
+    assert cfg.environment == "local"
+
+
+def test_any_http_url_accepts_https_and_subdomains() -> None:
+    """Given an https URL with a subdomain, when constructing ``BrowserConfig``, then it succeeds.
+
+    ``AnyHttpUrl`` accepts more than a plain ``HttpUrl``. This test
+    guards against a future change to ``HttpUrl`` that would reject
+    common test targets like ``https://staging.example.com``.
+    """
+    cfg = BrowserConfig(base_url="https://staging.example.com")  # type: ignore[arg-type]
+    assert cfg.base_url.scheme == "https"
+    assert cfg.base_url.host == "staging.example.com"
