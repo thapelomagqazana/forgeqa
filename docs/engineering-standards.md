@@ -669,7 +669,9 @@ Two layers, both required:
    `tests/unit/test_install_contract.py` parses `src/forgeqa/__init__.py`
    and `pyproject.toml`, and asserts:
    - `__version__` and `get_version` are exposed
-   - `__all__ == ("__version__", "get_version")`
+   - `__all__` matches the documented public surface
+     (`EXPECTED_ALL` in `tests/unit/test_public_api.py`, shared via
+     cross-module import so the two tests cannot drift)
    - no `sitecustomize.py` / `usercustomize.py` in the package
    - `py.typed` marker is present and empty
    - `Typing :: Typed` classifier is declared
@@ -717,6 +719,184 @@ interpreter (used by the CI matrix).
   contract that this section's "does it install?" contract complements.
 - `docs/public-api.md` §"Guarantees" — the import-time behaviour this
   section verifies from a clean environment.
+
+### 4.14 Public vs. Internal Module Conventions
+
+The public API is defined in `docs/public-api.md`. It is enforced by
+`tests/unit/test_public_api.py` and by `scripts/verify_build.sh`. This
+section documents the contributor-facing side of the contract — the
+rules a contributor must follow when adding, changing, or removing
+public names, and when deciding whether a new module is public or
+private.
+
+For the *consumer-facing* side (what `forgeqa.__version__` returns, what
+the optional dependencies install, what "stable" means), see
+`docs/public-api.md`. This section is the counterpart: it tells the
+contributor what they must do to keep the contract true.
+
+#### Rules
+
+1. **The public surface is `forgeqa.__all__`.** Every name in
+   `__all__` must be documented in `docs/public-api.md`, and vice
+   versa. Adding a name is a **semver-minor** event; removing or
+   renaming a name is **semver-major**.
+
+   Adding or removing a public name means updating **three places in
+   one PR**:
+   - `src/forgeqa/__init__.py` — the `__all__` tuple.
+   - `docs/public-api.md` — the "public surface" table and, if the
+     semver impact changes, the stability promise table.
+   - `tests/unit/test_public_api.py` — the `EXPECTED_ALL` constant.
+
+   Missing any of the three fails CI:
+   - `test_public_api.py::test_all_matches_documented_surface` catches
+     a divergence between `__all__` and `EXPECTED_ALL`.
+   - `test_public_api_doc_exists_and_mentions_underscore_rule` catches
+     a divergence between the doc and the rule.
+   - `test_install_contract.py::test_init_all_matches_documented_surface`
+     uses the same `EXPECTED_ALL` (cross-module import), so a fourth
+     copy of the expected value is not needed.
+
+   **`EXPECTED_ALL` is test-authoritative.** It is defined in
+   `tests/unit/test_public_api.py` and **not** imported from
+   `forgeqa.__all__`. Importing it from the code under test would make
+   every assertion a tautology — any change to `forgeqa.__all__` would
+   pass the test. Defining it in the test file creates the friction
+   that makes the contract meaningful: a change to the public surface
+   must be a *deliberate* three-place edit, not an accidental drift.
+
+2. **Single-underscore prefix means private.** Any module or name
+   starting with `_` is not public, not documented in
+   `docs/public-api.md` §"What is public", and not in `__all__`. This
+   includes:
+   - `forgeqa._internal`, `forgeqa._config`, `forgeqa._compat`
+   - `forgeqa._adapters.*`, `forgeqa._reporting.*`
+   - Any future private subpackage
+
+   Private modules *may* exist — they are for implementation
+   organization. They must not be imported by
+   `src/forgeqa/__init__.py` (see Rule 3), and they must not appear in
+   `sys.modules` after a bare `import forgeqa`. The rule is enforced
+   on four axes (see "Verification" below).
+
+   Dunder names (`__version__`, `__author__`) are public only when
+   documented in `docs/public-api.md` and listed in `__all__`.
+   `__version__` is public; `__author__` and `__license__` are
+   diagnostics. `test_no_underscore_name_in_all` enforces this: only
+   dunders in `EXPECTED_ALL` are allowed in `__all__`.
+
+3. **`src/forgeqa/__init__.py` imports only from public modules.**
+   The top-level package must not import any `_`-prefixed submodule.
+   Doing so would leak it into `sys.modules` after `import forgeqa`
+   and make it a de-facto part of the import surface (even if not in
+   `__all__`). Enforced by two tests:
+   - `test_no_private_submodule_imported_by_top_level` — runtime check
+     in a fresh subprocess, asserts no `forgeqa._*` module is in
+     `sys.modules`.
+   - `test_no_private_module_in_source_tree_top_level` — source check,
+     asserts the `__init__.py` source does not contain
+     `from ._<name>` or `import forgeqa._<name>` patterns.
+
+   To re-export a name from a private module as public, use an alias
+   and re-export the *name*, not the module:
+
+   ```python
+   # src/forgeqa/_internal.py defines _helper
+   from forgeqa._internal import _helper as public_name  # OK
+
+   __all__ = (..., "public_name")
+   ```
+
+   The private module *is* imported in this case (necessarily — the
+   name has to come from somewhere), but the exported name is public
+   and the private module's contents are not re-exported wholesale.
+
+4. **Public submodules are new top-level modules.** When Phase 1 adds
+   `forgeqa.fixtures`, `forgeqa.settings`, etc., they are:
+   - top-level modules (not `_`-prefixed)
+   - each with their own `__all__`
+   - added to `PUBLIC_SUBMODULES` in `test_public_api.py`
+     (`test_public_submodules_if_any` then asserts each submodule has
+     an `__all__` tuple)
+   - documented in `docs/public-api.md` §"Optional functionality"
+   - added to `forgeqa.__all__` if the submodule itself (not just its
+     names) is meant to be re-exported
+
+   Adding a public submodule is **semver-minor**. The pattern is the
+   same three-place edit as Rule 1, plus the submodule's own `__all__`
+   and its `PUBLIC_SUBMODULES` entry.
+
+5. **Do not use PEP 562 `__getattr__` without an ADR.** Lazy re-exports
+   (`from forgeqa import Settings` without importing pydantic) are
+   possible via `__getattr__` but introduce subtle behaviours
+   (`hasattr` returns `True` for lazily-computed names, tracebacks
+   point at `__getattr__` rather than the real module, and the
+   test suite would need to assert the lazy behaviour explicitly). If a
+   future API needs it, write an ADR first — ADR-002's reconsideration
+   trigger already lists this as a future decision.
+
+6. **`docs/public-api.md` and the code must agree.** The doc is the
+   human-readable contract; `forgeqa.__all__` is the machine-readable
+   form. A divergence fails:
+   - `test_all_matches_documented_surface` (tuple vs `EXPECTED_ALL`)
+   - `test_public_api_doc_exists_and_mentions_underscore_rule` (doc
+     exists and states the rule)
+
+   The doc's wording is asserted structurally, not verbatim: a change
+   from "private" to "internal" does not fail the test, but a wholesale
+   removal of the rule does.
+
+#### Verification
+
+Two layers, both required:
+
+1. **Config-level (fast, in-process).**
+   `tests/unit/test_public_api.py` parses `src/forgeqa/__init__.py`
+   and `docs/public-api.md`, and asserts:
+   - `forgeqa.__all__ == EXPECTED_ALL` (matches the doc)
+   - `__all__` is a `tuple` (immutable)
+   - every documented name is accessible
+   - `get_version() == __version__`
+   - no `_`-prefixed name is in `__all__` (four axes: membership,
+     structure, source, runtime)
+   - `docs/public-api.md` exists and states the `_`-prefix rule
+
+   Runs in <100 ms as part of `make test`. `make verify-public-api`
+   runs only these tests (~50 ms) for quick local iteration or as a
+   pre-commit hook.
+
+2. **End-to-end (wheel content).**
+   `scripts/verify_build.sh` inspects the wheel's contents and asserts
+   no `_`-prefixed top-level module is shipped. Defense in depth: the
+   wheel already excludes `tests/`, `docs/`, etc., but a future change
+   to `packages` could add a `_`-prefixed package without the config
+   catching it. Runs in ~10 s; `make verify-build`.
+
+Both run in CI on Ubuntu and macOS, on Python 3.11 and 3.12.
+
+#### Running the verification
+
+```bash
+# Fast, config-only (~50 ms)
+make verify-public-api
+
+# Or directly
+pytest tests/unit/test_public_api.py -v
+
+# End-to-end (wheel contents)
+make verify-build
+```
+
+#### See also
+
+- [ADR-006](../adr/ADR-006-formalise-public-api-surface-and-private-module-convention.md) — decision record.
+- `docs/public-api.md` — the consumer-facing contract.
+- `tests/unit/test_public_api.py` — the executable contract.
+- `tests/unit/test_install_contract.py` — shares `EXPECTED_ALL` via
+  cross-module import (single source of truth for the expected public
+  surface).
+- §4.12 "Built Artifact Content Inspection" — asserts no `_`-prefixed
+  top-level module is shipped in the wheel.
 
 ---
 
@@ -772,6 +952,7 @@ Before tagging a release:
 - [ ] `python -m build` succeeds without warnings.
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
+- [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -791,3 +972,4 @@ Before tagging a release:
 | 0.1.3 | 2026-10-28 | Solo Dev | Added §4.11 "Dependency Groups and Verification" (WBS 1.1.3); documented the constraint-style reconciliation as a Phase 1 follow-up; added `docs/public-api.md` to the Documentation Standards table; added `make verify-deps` to the Release Checklist. |
 | 0.1.4 | 2026-10-28 | Solo Dev | Added §4.12 "Built Artifact Content Inspection" (WBS 1.1.4); marked §1.6 as superseded by §4.12; added `make verify-build` to the Release Checklist; added `packaging` to the Dependency Inventory (from WBS 1.1.3's `[dev]` addition). |
 | 0.1.5 | 2026-10-28 | Solo Dev | Added §4.13 "Clean-Install Verification" (WBS 1.1.5); extended §1.6 superseded note to point at §4.13; added `make verify-install` to the Release Checklist; documented the `py.typed` marker requirement (PEP 561) tied to the `Typing :: Typed` classifier. |
+| 0.1.6 | 2026-10-28 | Solo Dev | Added §4.14 "Public vs. Internal Module Conventions" (WBS 1.1.6); documented the `EXPECTED_ALL` test-authoritative pattern and the cross-module sharing with `test_install_contract.py`; added `make verify-public-api` to the Release Checklist; cross-referenced `docs/public-api.md` and ADR-006. |
