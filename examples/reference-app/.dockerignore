@@ -1,0 +1,33 @@
+# =============================================================================
+# ForgeQA Reference Application - .dockerignore
+# =============================================================================
+
+# Virtual environments
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test artifacts
+.coverage
+htmlcov/
+artifacts/
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed at runtime)
+README.md

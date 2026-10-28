@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}Records - ForgeQA Reference App{% endblock %}
+
+{% block content %}
+<h2>Records</h2>
+
+<!-- ====================================================================== -->
+<!-- REF-06: Record list                                                    -->
+<!-- ====================================================================== -->
+<section data-testid="record-list">
+    <h3>Existing Records</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in records %}
+            <tr data-testid="record-item-{{ record.id }}">
+                <td>{{ record.id }}</td>
+                <td>{{ record.name }}</td>
+                <td>{{ record.status }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<hr>
+
+<!-- ====================================================================== -->
+<!-- REF-07 / REF-08: Create form                                            -->
+<!-- ====================================================================== -->
+<section>
+    <h3>Create a New Record</h3>
+
+    <!-- Success message (REF-07) -->
+    {% if success_message %}
+    <article
+        data-testid="success-message"
+        style="background-color: #d4edda; color: #155724; padding: 1rem; border-radius: 4px;"
+    >
+        {{ success_message }}
+    </article>
+    {% endif %}
+
+    <!-- Validation error (REF-08) -->
+    {% if error_message %}
+    <article
+        data-testid="validation-error"
+        style="background-color: #f8d7da; color: #721c24; padding: 1rem; border-radius: 4px;"
+    >
+        {{ error_message }}
+    </article>
+    {% endif %}
+
+    <form method="post" action="/ui/records">
+        <label for="name">
+            Record Name
+            <input
+                type="text"
+                id="name"
+                name="name"
+                data-testid="name-input"
+                placeholder="Enter a record name"
+                required
+            >
+        </label>
+        <button type="submit" data-testid="submit-button">
+            Create Record
+        </button>
+    </form>
+</section>
+{% endblock %}

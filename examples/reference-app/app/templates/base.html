@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ForgeQA Reference App{% endblock %}</title>
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"
+    >
+</head>
+<body>
+    <main class="container">
+        <header>
+            <h1 data-testid="app-heading">ForgeQA Reference App</h1>
+            <nav>
+                <ul>
+                    <li><a href="/ui/records">Records</a></li>
+                    <li><a href="/docs">API Docs</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
