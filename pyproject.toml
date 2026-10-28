@@ -44,7 +44,16 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Core dependencies (always installed)
+# Core dependencies (always installed).
+#
+# IMPORTANT: playwright and httpx MUST NOT appear here. They are optional
+# dependencies (see [project.optional-dependencies] below) and must only be
+# installed when the caller explicitly requests forgeqa[ui] or forgeqa[api].
+# Adding either to this list would install it for every consumer, violating
+# WBS 1.1.3. Enforced by:
+#   - tests/unit/test_dependency_groups.py::
+#       test_core_dependencies_do_not_include_optional_deps
+#   - scripts/verify_deps.sh (scenario: core)
 dependencies = [
     "pytest>=9.2.0",
     "pydantic>=2.14.1",
@@ -53,6 +62,30 @@ dependencies = [
 # =============================================================================
 # Optional Dependency Groups
 # =============================================================================
+# Per Phase 0.5.3 / WBS 1.1.3, the groups are:
+#   ui   -> Playwright only (browser automation)
+#   api  -> HTTPX only (HTTP client)
+#   dev  -> local development tooling (build, twine, mypy, ruff, ...)
+#   all  -> explicit union of ui + api + dev
+#
+# Invariants enforced by scripts/verify_deps.sh:
+#   pip install forgeqa          -> NO  playwright, NO  httpx
+#   pip install forgeqa[ui]      -> YES playwright, NO  httpx
+#   pip install forgeqa[api]     -> NO  playwright, YES httpx
+#   pip install forgeqa[all]     -> YES playwright, YES httpx
+#   pip install forgeqa[dev]     -> NO  playwright, NO  httpx  (dev is tooling only)
+#
+# Rules for contributors (see docs/engineering-standards.md):
+#   1. [project].dependencies must never include an optional dependency.
+#   2. Each single-purpose extra (ui, api) declares exactly one runtime dep.
+#   3. `all` is an explicit union; never a self-reference
+#      ("forgeqa[ui,api,dev]").
+#   4. Adding a new optional dep requires updating:
+#      - this file
+#      - tests/unit/test_dependency_groups.py
+#      - scripts/verify_deps.sh (new scenario + assertion)
+#      - tests/support.py FORBIDDEN_IMPORTS_ON_TOP_LEVEL
+#      - README.md "Optional extras" table
 [project.optional-dependencies]
 ui = [
     "playwright>=1.64.1",
@@ -63,13 +96,18 @@ api = [
 dev = [
     "build>=1.2",
     "twine>=5.1",
-    "mypy==1.11.2",
-    "ruff==0.17.3",
+    "mypy==1.11.2",          # Matches .pre-commit-config.yaml mirrors-mypy rev
+    "ruff==0.17.3",          # Matches .pre-commit-config.yaml ruff-pre-commit rev
     "pytest-cov",
-    "coverage[toml]", # Required for pytest-cov to read pyproject.toml config
+    "coverage[toml]",        # Required for pytest-cov to read pyproject.toml config
     "pre-commit",
+    "packaging",             # Used by scripts/verify_deps.sh for semantic version comparison
 ]
-# Combine all optional features for local development
+# Combine all optional features for local development.
+# Explicit list, not a self-reference ("forgeqa[ui,api,dev]"): self-references
+# work on modern pip but warn on older resolvers and cannot be statically
+# flattened by tooling. Enforced by:
+#   tests/unit/test_dependency_groups.py::test_no_self_reference_in_all
 all = [
     "playwright>=1.64.1",
     "httpx>=0.27",
@@ -80,6 +118,7 @@ all = [
     "pytest-cov",
     "coverage[toml]",
     "pre-commit",
+    "packaging",
 ]
 
 # =============================================================================

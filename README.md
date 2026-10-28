@@ -73,6 +73,45 @@ pip install forgeqa
 pip install forgeqa[all]
 ```
 
+### 1a. Optional extras
+
+ForgeQA's core install is intentionally lightweight: `pip install forgeqa`
+installs **Pytest** and **Pydantic** only. UI and API automation are
+opt-in, so that CI tooling and scripted jobs can use ForgeQA without
+installing a browser or an HTTP client.
+
+| Extra | Installs | When to use |
+| :--- | :--- | :--- |
+| *(none)* | Pytest, Pydantic | You only want the framework's core helpers; no browser, no HTTP client. |
+| `forgeqa[ui]` | + Playwright (`playwright>=1.64.1`) | You write UI / browser tests with `from forgeqa.fixtures import browser`. |
+| `forgeqa[api]` | + HTTPX (`httpx>=0.27`) | You write API tests with `from forgeqa.fixtures import api_client`. |
+| `forgeqa[dev]` | + build, twine, mypy, ruff, pytest-cov, pre-commit, packaging | You are developing ForgeQA itself. |
+| `forgeqa[all]` | all of the above | You want UI + API + dev tooling in one install (e.g. the reference app). |
+
+Install commands:
+
+```bash
+# Core only — no playwright, no httpx
+pip install forgeqa
+
+# UI tests — installs playwright
+pip install "forgeqa[ui]"
+playwright install chromium   # one-time browser download
+
+# API tests — installs httpx
+pip install "forgeqa[api]"
+
+# Everything for local development (core + ui + api + dev tooling)
+pip install "forgeqa[all]"
+```
+
+The extras are verified on every PR by `scripts/verify_deps.sh` (run locally
+via `make verify-deps`). That script installs ForgeQA into a series of
+isolated virtual environments and asserts that each extra installs (and only
+installs) what the table promises. See
+[`docs/engineering-standards.md`](docs/engineering-standards.md#dependency-groups-and-verification)
+for the contributor-facing rules.
+
 ### 2. Configure Your Project
 
 Create a `forgeqa.toml` file in your project root:
@@ -100,6 +139,7 @@ Create `tests/test_example.py`:
 def test_homepage(page):
     page.goto("/")
     assert page.title() == "My App"
+
 
 def test_health(api_client):
     response = api_client.get("/health")
@@ -264,6 +304,7 @@ pip install -e ".[dev]"
 | `make test-unit` | Run unit tests only. |
 | `make test-cov` | Run tests with coverage. |
 | `make build` | Build wheel and sdist. |
+| `make verify-deps` | Verify `[ui]` / `[api]` / `[all]` / `[dev]` extras install exactly what they promise (isolated venvs). |
 | `make ci` | Run the full CI pipeline locally. |
 | `make adr-new TITLE="..."` | Create a new ADR. |
 | `make hooks-install` | Install pre-commit hooks. |
