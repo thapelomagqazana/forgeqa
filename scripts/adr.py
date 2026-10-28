@@ -74,7 +74,7 @@ def new_adr(title: str) -> None:
         .replace("{title}", title)
         .replace("{status}", "Proposed")
         .replace("{date}", date.today().isoformat())
-        .replace("{deciders}", "Solo Developer")
+        .replace("{deciders}", "@thapelomagqazana")
         .replace("{consulted}", "None")
         .replace("{informed}", "None")
     )

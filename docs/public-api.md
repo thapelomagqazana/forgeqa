@@ -17,13 +17,25 @@ The companion documents are:
 - [`ADR-006`](adr/ADR-006-formalise-public-api-surface-and-private-module-convention.md)
   — the decision record for this contract (the `_`-prefix rule and the
   semver promise).
+- [`ADR-007`](adr/ADR-007-pydantic-config-hierarchy.md) — the
+  configuration schema decision.
+- [`ADR-008`](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) — the
+  configuration loader decision.
 - [`docs/engineering-standards.md`](engineering-standards.md) — the rules
   contributors follow to keep this contract intact (§4.14 is the
-  contributor-facing counterpart to this document).
+  contributor-facing counterpart to this document; §5.1 and §5.2 cover the
+  configuration schema and loader).
+- [`docs/configuration.md`](configuration.md) — the consumer-facing
+  reference for `forgeqa.toml`: every field, type, default, validation
+  rule, and loader behaviour.
 - [`tests/unit/test_import.py`](../tests/unit/test_import.py) — the
   executable form of the import-time guarantees below.
 - [`tests/unit/test_public_api.py`](../tests/unit/test_public_api.py) —
-  the executable form of the public-surface contract below.
+  the executable form of the top-level public-surface contract below.
+- [`tests/unit/config/test_models.py`](../tests/unit/config/test_models.py)
+  — the executable form of the `forgeqa.config` schema contract.
+- [`tests/unit/config/test_loader.py`](../tests/unit/config/test_loader.py)
+  — the executable form of the `forgeqa.config.load_config` contract.
 
 ---
 
@@ -39,11 +51,12 @@ forgeqa.__all__  # tuple[str, ...], the names below
 
 ### The public surface of `forgeqa`
 
-**As of 0.1.0 (pre-alpha), the entire public API of ForgeQA consists of
-the following names, importable from the top-level `forgeqa` package.**
-Everything else — fixtures, settings, adapters, reporting — lands in
-Phase 1 (MVP) and will be added to this document (and to
-`forgeqa.__all__`) in the same PR that ships it.
+**As of 0.1.0 (pre-alpha), the entire public API of the top-level
+`forgeqa` package consists of the following names.** Everything else —
+fixtures, settings, adapters, reporting — lands in Phase 1 (MVP) and will
+be added to this document (and to `forgeqa.__all__`) in the same PR that
+ships it. The `forgeqa.config` subpackage has its own public surface; see
+[`forgeqa.config`](#forgeqaconfig) below.
 
 | Name | Kind | Since | Description |
 | :--- | :--- | :--- | :--- |
@@ -115,6 +128,78 @@ The public-vs-internal contract is enforced by
 
 ---
 
+## `forgeqa.config`
+
+The `forgeqa.config` subpackage is the public interface to ForgeQA's
+configuration. It is a **top-level public module** — not `_`-prefixed —
+so `from forgeqa.config import ForgeQAConfig` is a stable import path.
+
+It is **not** imported by `import forgeqa` (the top-level module is
+deliberately minimal). It is imported only when a consumer needs to read
+or construct a config.
+
+### The public surface of `forgeqa.config`
+
+`forgeqa.config.__all__ == ( "APIConfig", "BrowserConfig", "BrowserName",
+"DEFAULT_CONFIG_FILENAME", "DiagnosticsConfig", "ForgeQAConfig",
+"ForgeQAConfigError", "GeneralConfig", "LogLevel", "ReportingConfig",
+"find_config_path", "load_config" )`.
+
+| Name | Kind | Since | Description |
+| :--- | :--- | :--- | :--- |
+| `forgeqa.config.ForgeQAConfig` | `type[BaseModel]` | 0.2.0 | The root configuration model. Composes the five sub-models. Instantiable with no arguments (all defaults). Frozen and forbids unknown keys. |
+| `forgeqa.config.GeneralConfig` | `type[BaseModel]` | 0.2.0 | Run identity (environment, artifacts dir, log level). |
+| `forgeqa.config.BrowserConfig` | `type[BaseModel]` | 0.2.0 | UI (Playwright) adapter configuration. |
+| `forgeqa.config.APIConfig` | `type[BaseModel]` | 0.2.0 | API (HTTPX) adapter configuration. |
+| `forgeqa.config.DiagnosticsConfig` | `type[BaseModel]` | 0.2.0 | What evidence to capture (screenshots, traces, console logs). |
+| `forgeqa.config.ReportingConfig` | `type[BaseModel]` | 0.2.0 | What reports to emit (JUnit XML, JSON report). |
+| `forgeqa.config.BrowserName` | `typing.Literal` alias | 0.2.0 | The set of valid `browser_name` values (`"chromium"`, `"firefox"`, `"webkit"`). Exposed so consumers can type their own helpers against the same set. |
+| `forgeqa.config.LogLevel` | `typing.Literal` alias | 0.2.0 | The set of valid `log_level` values (`"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`). Exposed for the same reason. |
+| `forgeqa.config.load_config` | `(path: Path \| str \| None = None) -> ForgeQAConfig` | 0.2.0 | Load a `forgeqa.toml` file into a `ForgeQAConfig`. Falls back to defaults if no file is present. |
+| `forgeqa.config.find_config_path` | `(directory: Path \| None = None) -> Path \| None` | 0.2.0 | Find `forgeqa.toml` in a directory. Returns an absolute path or `None`. |
+| `forgeqa.config.DEFAULT_CONFIG_FILENAME` | `str` | 0.2.0 | The filename `load_config` searches for (`"forgeqa.toml"`). |
+| `forgeqa.config.ForgeQAConfigError` | `type[Exception]` | 0.2.0 | Raised by `load_config` for malformed TOML, invalid values, unreadable files, or a missing explicit path. Carries a `path` attribute. |
+
+### Guarantees
+
+`import forgeqa.config`:
+
+- **Is cheap.** Does not import Playwright, HTTPX, or Pytest. It imports
+  `pydantic` (for the models) and `tomllib` (for the loader); both are
+  core dependencies. On a warm interpreter it completes in a few
+  milliseconds.
+- **Is side-effect free.** No file reads, no network calls, no log
+  records, no warnings. The import itself does not call `load_config`.
+- **`load_config()` is deterministic.** Each call reads the file fresh
+  (no caching). Two calls on the same file produce equal configs; two
+  calls with an edit in between produce different configs.
+- **`load_config()` never returns a partial config.** A partial
+  `forgeqa.toml` produces a fully-populated `ForgeQAConfig` with
+  defaults for unspecified fields.
+- **`load_config()` raises `ForgeQAConfigError`** for any load failure,
+  with a message that names the file path (and, for syntax errors,
+  the line/column when `tomllib` provides it).
+
+These guarantees are enforced by `tests/unit/config/test_models.py`
+(schema) and `tests/unit/config/test_loader.py` (loader). See
+[`docs/configuration.md`](configuration.md) for the consumer-facing
+reference.
+
+### Stability promise for `forgeqa.config`
+
+The same semver rules apply (see [Stability promise](#stability-promise-summary)
+below). In particular:
+
+- Adding a field to a model is **patch** (the default is preserved for
+  existing configs).
+- Adding a new model, or a new public function, is **minor**.
+- Removing or renaming a name in `forgeqa.config.__all__` is **major**.
+- Changing a default is **minor** (it changes consumer behaviour); it
+  is documented in the release notes.
+- Changing `load_config`'s signature (in a non-additive way) is **major**.
+
+---
+
 ## Version resolution
 
 `forgeqa.__version__` is resolved from the **installed distribution's
@@ -165,23 +250,22 @@ on the ADR-002 reconsideration-trigger list.
 
 ---
 
-## Optional functionality
+## Optional functionality (Phase 1)
 
 The following are **not** imported by `import forgeqa`. They are imported
 explicitly from their submodules when the caller needs them. They require the
-corresponding optional extras.
+corresponding optional extras, and they **land in Phase 1** — none of them
+exist yet.
 
 | Import | Requires extra | Available from | Purpose |
 | :--- | :--- | :--- | :--- |
 | `from forgeqa.fixtures import browser` | `forgeqa[ui]` | Phase 1 (MVP) | Playwright browser fixture. |
 | `from forgeqa.fixtures import api_client` | `forgeqa[api]` | Phase 1 (MVP) | HTTPX API client fixture. |
-| `from forgeqa.settings import load_settings` | core | Phase 1 (MVP) | Read `forgeqa.toml` and return a validated `Settings` object. |
-| `from forgeqa.settings import Settings` | core | Phase 1 (MVP) | Validated settings type (Pydantic model). |
 
 > **Why these are not imported at the top level:** importing them would
-> require Playwright, HTTPX, or Pydantic at `import forgeqa` time, which
-> breaks the isolation guarantee above. The submodule is loaded only when the
-> caller actually asks for the fixture or the settings loader.
+> require Playwright or HTTPX at `import forgeqa` time, which breaks the
+> isolation guarantee above. The submodule is loaded only when the caller
+> actually asks for the fixture.
 
 When these submodules land, each will:
 
@@ -224,7 +308,10 @@ including in patch releases, without notice:
 
 4. **The internal layout of `src/forgeqa/`** — the directory structure
    (whether `src/` or flat, whether `_adapters/` or `adapters/`) is an
-   implementation detail.
+   implementation detail. Also: the internal layout of
+   `src/forgeqa/config/` (`models.py`, `loader.py`, `errors.py` may be
+   split or reorganised; import from `forgeqa.config`, not from
+   `forgeqa.config.models`).
 
 5. **The exact value of `"0.0.0+unknown"`** (in the fallback case) —
    treat it as "not a real version" and do not pattern-match against
@@ -235,6 +322,11 @@ including in patch releases, without notice:
    (zip-import, namespace packages spanning multiple roots). These are
    not supported for ForgeQA itself; sub-modules may document their
    own behaviour later.
+
+7. **The `ForgeQAConfigError` message format.** The message is for
+   humans; the `path` attribute is the stable programmatic interface.
+   A tool that parses the message (fragile but possible) is not
+   covered by the contract. See ADR-008's reconsideration trigger.
 
 ### Why the `_`-prefix rule
 
@@ -282,11 +374,17 @@ alternative that we should document instead.
 
 | Change | Semver impact |
 | :--- | :--- |
-| Add a name to `forgeqa.__all__` | minor |
-| Remove or rename a name in `forgeqa.__all__` | major |
+| Add a name to `forgeqa.__all__` or `forgeqa.config.__all__` | minor |
+| Remove or rename a name in `forgeqa.__all__` or `forgeqa.config.__all__` | major |
 | Change `get_version()` return type | major |
 | Change the fallback sentinel `"0.0.0+unknown"` | patch (it is not public), but the *fact* that a fallback exists is public — a "no fallback, raise" policy would be major. |
-| Add a new documented submodule (`forgeqa.fixtures`, `forgeqa.api`, …) | minor |
+| Add a new documented submodule (`forgeqa.fixtures`, `forgeqa.config`, …) | minor |
+| Add a field to a `forgeqa.config` model (with a default) | patch |
+| Change a `forgeqa.config` model field's default | minor |
+| Change a `forgeqa.config` model field's type (accepting new values) | minor |
+| Change a `forgeqa.config` model field's type (rejecting previously valid values) | major |
+| Change `load_config`'s signature (in a non-additive way) | major |
+| Change the `ForgeQAConfigError` message format | patch (the message is for humans; the `path` attribute is the stable interface) |
 | Change import-time guarantees (e.g. begin importing Playwright at top level) | major (would be a breaking change for consumers without the `ui` extra). |
 | Add a top-level warning at import | major (it would break `-W error` consumers). |
 | Move a public name into a `_`-prefixed module | major (would break anyone importing the public name). |
@@ -296,13 +394,13 @@ alternative that we should document instead.
 
 ## How this contract is enforced
 
-This document is the human-readable contract. Four tools enforce the
+This document is the human-readable contract. Six tools enforce the
 machine-readable form on every pull request:
 
-1. **`tests/unit/test_public_api.py`** — asserts `__all__` matches
-   `EXPECTED_ALL` (a test-authoritative constant, not imported from
-   `forgeqa`, so a change to `forgeqa.__all__` without a change to the
-   test fails). Also asserts the `_`-prefix rule on four axes, that
+1. **`tests/unit/test_public_api.py`** — asserts `forgeqa.__all__`
+   matches `EXPECTED_ALL` (a test-authoritative constant, not imported
+   from `forgeqa`, so a change to `forgeqa.__all__` without a change to
+   the test fails). Also asserts the `_`-prefix rule on four axes, that
    `get_version() == __version__`, and that this document exists and
    states the rule. Runs in ~50 ms; also invocable as
    `make verify-public-api`.
@@ -312,37 +410,53 @@ machine-readable form on every pull request:
    warnings, no optional dependency imported at top level. Runs in
    ~1 s as part of `make test`.
 
-3. **`scripts/verify_build.sh`** — asserts the wheel contains the
+3. **`tests/unit/config/test_models.py`** — asserts the schema
+   contract: defaults, valid values, invalid values, boundary values,
+   composition, immutability, JSON schema. Runs in ~50 ms as part of
+   `make verify-config`.
+
+4. **`tests/unit/config/test_loader.py`** — asserts the loader
+   contract: valid files, missing files, malformed TOML, invalid
+   values, edge cases, idempotency, determinism. Runs in ~50 ms as
+   part of `make verify-config`.
+
+5. **`scripts/verify_build.sh`** — asserts the wheel contains the
    package and `LICENSE`, and does not contain `tests/`, `docs/`, or
    any `_`-prefixed top-level module. Runs in ~10 s; `make verify-build`.
 
-4. **`scripts/verify_install.sh`** — asserts the wheel installs in a
+6. **`scripts/verify_install.sh`** — asserts the wheel installs in a
    fresh venv and `import forgeqa` resolves outside the source tree.
    Runs in ~20 s; `make verify-install`.
 
-`make ci` runs all four. `make verify-public-api` runs only the
-public-API contract test (~50 ms) for quick local iteration or as a
-pre-commit hook.
+`make ci` runs all six. `make verify-public-api` runs only the
+top-level public-API contract test (~50 ms) for quick local iteration
+or as a pre-commit hook. `make verify-config` runs only the config
+tests (~100 ms) for the same reason.
 
 ---
 
 ## Reporting issues with the public API
 
-If `import forgeqa` violates any guarantee in this document — e.g. it imports
-Playwright, it emits a warning, or `forgeqa.__version__` disagrees with
-`pip show forgeqa` — please open an issue at
+If `import forgeqa` or `forgeqa.config` violates any guarantee in this
+document — e.g. `import forgeqa` imports Playwright, it emits a
+warning, `forgeqa.__version__` disagrees with `pip show forgeqa`, or
+`load_config` returns a partial config — please open an issue at
 <https://github.com/thapelomagqazana/forgeqa/issues> with:
 
 1. The output of `python -c "import forgeqa; print(forgeqa.__version__)"`.
 2. The output of `pip show forgeqa`.
 3. The output of `python -c "import sys; print(sorted(sys.modules))"` after
    `import forgeqa` (redact anything sensitive).
-4. The Python version and platform.
+4. If the issue is config-related: the contents of your `forgeqa.toml`
+   (redact any secrets; ForgeQA does not put secrets in config, but
+   a user might), the output of `python -c "from forgeqa.config import load_config; print(load_config())"`, and any `ForgeQAConfigError` message.
+5. The Python version and platform.
 
 Every guarantee in this document is covered by a test. A regression that
 violates the contract should be caught by CI; a user-visible failure
 therefore usually indicates an environment problem (editable install drift,
-a stale `.venv`, or an interpreter-level `-W error` flag), which the four
+a stale `.venv`, an interpreter-level `-W error` flag, or — for config
+issues — a `forgeqa.toml` that was edited but not re-read), which the
 diagnostics above will identify.
 
 ---
@@ -354,7 +468,10 @@ diagnostics above will identify.
   dependency rules.
 - [`docs/engineering-standards.md`](engineering-standards.md) — the
   contributor-facing rules, including §4.14 "Public vs. Internal Module
-  Conventions".
+  Conventions" and §5 "Configuration" (§5.1 schema, §5.2 loader).
+- [`docs/configuration.md`](configuration.md) — the consumer-facing
+  reference for `forgeqa.toml`: every field, type, default,
+  validation rule, and loader behaviour.
 - [`docs/adr/ADR-001`](adr/ADR-001-adopt-mit-license-file-and-pep-621-compliant-package-metadata.md)
   — package metadata baseline.
 - [`docs/adr/ADR-002`](adr/ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md)
@@ -363,7 +480,15 @@ diagnostics above will identify.
   — clean install (the consumer-facing side of `scripts/verify_install.sh`).
 - [`docs/adr/ADR-006`](adr/ADR-006-formalise-public-api-surface-and-private-module-convention.md)
   — this contract.
+- [`docs/adr/ADR-007`](adr/ADR-007-pydantic-config-hierarchy.md) — the
+  configuration schema decision.
+- [`docs/adr/ADR-008`](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md)
+  — the configuration loader decision.
 - [`tests/unit/test_import.py`](../tests/unit/test_import.py) — the
   executable form of the import-time guarantees.
 - [`tests/unit/test_public_api.py`](../tests/unit/test_public_api.py) —
   the executable form of the public-surface contract.
+- [`tests/unit/config/test_models.py`](../tests/unit/config/test_models.py)
+  — the executable form of the config schema contract.
+- [`tests/unit/config/test_loader.py`](../tests/unit/config/test_loader.py)
+  — the executable form of the config loader contract.

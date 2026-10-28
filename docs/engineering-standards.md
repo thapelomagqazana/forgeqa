@@ -902,6 +902,20 @@ make verify-build
 
 ## 5. Configuration
 
+ForgeQA's configuration is split into three concerns:
+
+1. **The schema** (§5.1) — what a valid config looks like. Enforced by
+   Pydantic v2 in `src/forgeqa/config/models.py`. No file I/O.
+2. **The loader** (§5.2) — how a `forgeqa.toml` file becomes a
+   `ForgeQAConfig`. `src/forgeqa/config/loader.py`.
+3. **The consumer doc** (`docs/configuration.md`) — the reference for
+   every field, type, default, and validation rule.
+
+The three are separate so each is testable independently: the schema
+without files, the loader without re-testing the schema, and the doc
+without either. See §5.1 and §5.2 for the contributor-facing rules and
+`docs/configuration.md` for the consumer-facing reference.
+
 ### 5.1 Configuration schema conventions
 
 The ForgeQA configuration schema (`src/forgeqa/config/models.py`) is a
@@ -977,8 +991,8 @@ contributors follow when adding or changing a config field.
 
 8. **The schema does not load files.** Loading `forgeqa.toml`
    (environment overlays, secret resolution, path expansion) is a
-   separate concern (WBS 1.2.2). The schema is the contract; the
-   loader is the mechanism. Tests for the schema use pure-Python
+   separate concern (§5.2, WBS 1.2.2). The schema is the contract;
+   the loader is the mechanism. Tests for the schema use pure-Python
    construction; tests for the loader are separate.
 
 #### Verification
@@ -1020,6 +1034,107 @@ pytest tests/unit/config/test_models.py -v
 - `src/forgeqa/config/models.py` — the schema source.
 - `tests/unit/config/test_models.py` — the executable contract.
 
+### 5.2 Configuration loader conventions
+
+The ForgeQA config loader (`src/forgeqa/config/loader.py`) reads a
+`forgeqa.toml` file into a `ForgeQAConfig`. This section documents the
+conventions contributors follow when extending or changing the loader.
+
+The loader is a separate concern from the schema (§5.1). The schema is
+the contract; the loader is the mechanism. The split means the schema is
+testable without files, and the loader is testable without re-testing
+the schema.
+
+#### Rules
+
+1. **`load_config` is the whole public API.** One function, one
+   signature (`path: Path | str | None = None`), one return type
+   (`ForgeQAConfig`). A caller does not need to know about `tomllib`,
+   `find_config_path`, or the Pydantic model.
+
+2. **Search order is explicit > cwd > defaults.** An explicit path
+   that does not exist is an error; a missing cwd file is not. "Explicit
+   is not silent": a caller who passes `path=...` and gets a missing
+   file should see `ForgeQAConfigError`, not a silent fallback to
+   defaults.
+
+3. **One exception type for all load failures.** `ForgeQAConfigError`
+   covers malformed TOML, invalid values, unreadable files, and
+   missing explicit paths. The original exception is preserved as
+   `__cause__` for debugging. The message includes the file path; for
+   syntax errors, the line/column when `tomllib` provides it.
+
+4. **No caching.** Each call reads the file fresh. A developer who
+   edits `forgeqa.toml` and calls `load_config()` again sees the new
+   values. Pinned by `test_loader_does_not_cache`. Caching would
+   introduce a staleness failure mode that is worse than the ~1 ms
+   file read it would save.
+
+5. **UTF-8 encoding explicitly.** `tomllib` requires UTF-8; the loader
+   reads as UTF-8 to be deterministic on Windows (where the default
+   encoding is platform-dependent). The `except` clause catches
+   `(OSError, UnicodeDecodeError)` — both are "the file could not be
+   read as UTF-8 text", which the user needs to fix.
+
+6. **No environment-variable overrides in the current version.**
+   `FORGEA_CONFIG_PATH`, `FORGEA_ENV`, and per-field overrides are
+   Phase 1 follow-ups. Adding them now would expand the loader's
+   contract without a driving acceptance criterion. When they land, the
+   ADR-008 reconsideration trigger documents the precedence order to
+   define.
+
+7. **The loader does not modify the schema.** A field added to the
+   schema (§5.1) is automatically available to the loader via
+   `ForgeQAConfig(**data)`. No loader change is needed for a new field.
+   This is why the schema/loader split matters: the schema changes
+   alone, and the loader inherits the change.
+
+8. **Tests use the real filesystem.** `pytest`'s `tmp_path` fixture
+   plus `monkeypatch.chdir`. Mocking `Path.read_text` tests the mock,
+   not the loader. The filesystem is the loader's input; the test
+   should use it directly.
+
+#### Verification
+
+`tests/unit/config/test_loader.py` is the executable contract. It
+covers:
+
+| Category | Tests |
+| :--- | :--- |
+| Positive | `test_loads_valid_config`, `test_loads_partial_config_preserves_defaults`, `test_loads_explicit_path`, `test_loads_path_as_string` |
+| Negative | `test_missing_file_returns_default_config`, `test_explicit_missing_path_raises`, `test_malformed_toml_raises_config_error`, `test_invalid_value_raises_config_error`, `test_unknown_key_raises_config_error` |
+| Edge | `test_empty_file_returns_default_config`, `test_comments_only_file_returns_default_config`, `test_whitespace_only_file_returns_default_config` |
+| Corner | `test_explicit_path_overrides_cwd`, `test_find_config_path_returns_absolute_path`, `test_find_config_path_returns_none_when_absent`, `test_find_config_path_returns_none_for_missing_directory`, `test_find_config_path_ignores_directories` |
+| Boundary | `test_error_includes_file_path`, `test_errors_have_path_attribute` |
+| Non-functional | `test_loader_is_idempotent`, `test_loader_does_not_cache`, `test_error_message_is_deterministic` |
+
+`make verify-config` runs the whole `tests/unit/config/` directory,
+which includes both `test_models.py` (schema) and `test_loader.py`
+(loader). There is no separate `make verify-loader` — the loader is a
+part of the configuration contract, and the two test files together
+are the contract.
+
+#### Running the verification
+
+```bash
+# Fast, config-only (~50 ms + loader tests)
+make verify-config
+
+# Or directly
+pytest tests/unit/config/ -v
+```
+
+#### See also
+
+- [ADR-008](../adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) —
+  decision record for the configuration loader.
+- `docs/configuration.md` §"Loading configuration" — consumer-facing
+  reference (search order, errors, determinism, examples).
+- `src/forgeqa/config/loader.py` — the loader source.
+- `src/forgeqa/config/errors.py` — the `ForgeQAConfigError` source.
+- `tests/unit/config/test_loader.py` — the executable contract.
+- §5.1 "Configuration schema conventions" — the schema counterpart.
+
 ---
 
 ## 6. Security & Secret Handling
@@ -1043,7 +1158,7 @@ pytest tests/unit/config/test_models.py -v
 | `docs/architecture.md` | System context, container diagrams, dependency rules. |
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
 | `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
-| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` (every field, type, default, validation rule). |
+| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` (every field, type, default, validation rule, and loader behaviour). |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -1076,7 +1191,7 @@ Before tagging a release:
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
-- [ ] `make verify-config` passes (configuration schema; WBS 1.2.1).
+- [ ] `make verify-config` passes (configuration schema and loader; WBS 1.2.1, 1.2.2).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -1098,3 +1213,4 @@ Before tagging a release:
 | 0.1.5 | 2026-10-28 | Solo Dev | Added §4.13 "Clean-Install Verification" (WBS 1.1.5); extended §1.6 superseded note to point at §4.13; added `make verify-install` to the Release Checklist; documented the `py.typed` marker requirement (PEP 561) tied to the `Typing :: Typed` classifier. |
 | 0.1.6 | 2026-10-28 | Solo Dev | Added §4.14 "Public vs. Internal Module Conventions" (WBS 1.1.6); documented the `EXPECTED_ALL` test-authoritative pattern and the cross-module sharing with `test_install_contract.py`; added `make verify-public-api` to the Release Checklist; cross-referenced `docs/public-api.md` and ADR-006. |
 | 0.1.7 | 2026-10-28 | Solo Dev | Added §5 "Configuration" and §5.1 "Configuration schema conventions" (WBS 1.2.1); added `make verify-config` to the Release Checklist; added `docs/configuration.md` to the Documentation Standards table; noted Pydantic's bounded bool coercion in §5.1 rule 1. |
+| 0.1.8 | 2026-10-28 | Solo Dev | Added §5.2 "Configuration loader conventions" (WBS 1.2.2); added a §5 preamble pointing at `docs/configuration.md` and the schema/loader split; added the loader to §5.1 rule 8's cross-reference; expanded the §8.2 Release Checklist entry to cover both schema and loader; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention loader behaviour. |
