@@ -2,7 +2,7 @@
 
 > **Project Status: Pre-alpha**
 > **Version**: 0.1.0
-> **Last Updated**: 2026-10-27
+> **Last Updated**: 2026-10-28
 > **Owner**: Solo Developer
 
 ---
@@ -241,6 +241,8 @@ ForgeQA separates dependencies into groups so that users only install what they 
 
 > **Rule**: Do not pin dependencies to exact versions (`==`) in `pyproject.toml`. Use the lockfile (`uv.lock`) for reproducible local development and CI. Exact pins in `pyproject.toml` prevent users from receiving security patches.
 
+> **Current-state note (Phase 0 / WBS 1.1.3):** The shipped `pyproject.toml` currently uses `>=` for **core** dependencies (`pytest>=9.2.0`, `pydantic>=2.14.1`), not `~=`. Reconciling the constraint style is a **Phase 1 follow-up** because (a) it changes install behaviour for every consumer and (b) it should land together with the `uv.lock` lockfile that makes the constraint style meaningful. Until then, the `~=` row above documents the *intended* policy; the actual shipped file is the source of truth for what consumers get today. Do not change one without the other.
+
 **Example `pyproject.toml`:**
 
 ```toml
@@ -355,6 +357,111 @@ Before merging any dependency update PR:
 - [ ] For security updates: documented in `CHANGELOG.md`.
 - [ ] For dependency inventory changes: `docs/engineering-standards.md` updated.
 
+### 4.11 Dependency Groups and Verification
+
+The four optional dependency groups (`ui`, `api`, `dev`, `all`) are a
+**contract**, not just a declaration. A consumer installing `forgeqa`
+core must not get Playwright or HTTPX; a consumer installing
+`forgeqa[ui]` must get Playwright and **not** HTTPX; and so on. This
+section documents the rules that keep the contract true and the tools
+that verify it.
+
+#### Rules
+
+1. **`[project].dependencies` must not include an optional dependency.**
+   Adding `playwright` or `httpx` there installs it for every consumer,
+   defeating the purpose of extras. This is the configuration-level
+   invariant, enforced by
+   `tests/unit/test_dependency_groups.py::test_core_dependencies_do_not_include_optional_deps`.
+
+2. **Each single-purpose extra declares exactly one runtime dependency.**
+   - `ui` → Playwright only.
+   - `api` → HTTPX only.
+   - `dev` → build/verification tooling only (no runtime deps).
+   - `all` → the explicit union of the above.
+
+   Enforced by `test_ui_group_contains_playwright_only`,
+   `test_api_group_contains_httpx_only`, and
+   `test_all_group_is_explicit_union`.
+
+3. **`all` is an explicit list, never a self-reference.**
+   `all = ["forgeqa[ui,api,dev]"]` is valid per PEP 508 but warns on older
+   resolvers and cannot be statically flattened by tooling. List the
+   concrete dependencies. Enforced by
+   `test_no_self_reference_in_all`.
+
+4. **Adding a new optional dependency means updating five files in one PR:**
+   1. `pyproject.toml` — declare the dependency in the appropriate extra.
+   2. `tests/unit/test_dependency_groups.py` — assert the new group's
+      shape (or extend an existing assertion).
+   3. `scripts/verify_deps.sh` — add a scenario (see "Verification"
+      below) and extend the cross-extra "not installed" assertions so
+      the new dep is proven absent in the other extras.
+   4. `tests/support.py` `FORBIDDEN_IMPORTS_ON_TOP_LEVEL` — add the
+      import name (so the 1.1.2 top-level-import isolation test covers
+      it automatically).
+   5. `README.md` §"Optional extras" — add a row to the table.
+
+   Missing any of these means the contract is documented but not
+   enforced (or enforced but not documented).
+
+5. **Tool versions pinned in `[dev]` must match `.pre-commit-config.yaml`.**
+   `ruff` and `mypy` are pinned to exact versions in both places
+   (`ruff==0.17.3`, `mypy==1.11.2` at the time of writing) because their
+   formatters and checkers can disagree across minor versions. Drift
+   causes spurious reformats on every commit and hides real issues
+   (see WBS 1.1.2's tooling-drift incident). The `make tooling-check`
+   target fails CI when the two sides disagree.
+
+#### Verification
+
+Two layers, both required:
+
+1. **Config-level (fast, in-process).**
+   `tests/unit/test_dependency_groups.py` parses `pyproject.toml` and
+   asserts the group shape. Runs in <100 ms as part of `make test`.
+   Catches a typo in `pyproject.toml` before a slow install cycle.
+
+2. **End-to-end (slow, isolated).**
+   `scripts/verify_deps.sh` (or `make verify-deps`) builds a wheel from
+   local source, installs it in five fresh virtual environments (`core`,
+   `ui`, `api`, `all`, `dev`), and asserts that the installed modules
+   match the declared groups. Catches transitive leaks (a runtime dep
+   that itself pulls in HTTPX) and install-time breakage — failures a
+   static read of `pyproject.toml` cannot detect.
+
+Neither layer is sufficient alone:
+
+- Config-only verification cannot see a transitive dependency leak.
+- End-to-end-only verification makes `make test` slow (~2.5 min) for
+  every contributor on every change.
+
+Both run in CI on Ubuntu and macOS, on Python 3.11 and 3.12.
+
+#### Running the verification
+
+```bash
+# Fast, config-only
+pytest tests/unit/test_dependency_groups.py -v
+
+# Slow, end-to-end (all five scenarios, ~2.5 min)
+make verify-deps
+
+# Slow, end-to-end (single scenario, ~30 s)
+./scripts/verify_deps.sh core
+
+# Debug a failing scenario
+KEEP_VENVS=1 ./scripts/verify_deps.sh ui
+```
+
+`PYTHON_BIN=python3.12 ./scripts/verify_deps.sh` selects a specific
+interpreter (used by the CI matrix).
+
+#### See also
+
+- [ADR-003](../adr/ADR-003-verify-optional-dependency-groups-via-isolated-venv.md) — decision record for this verification strategy.
+- `README.md` §"Optional extras" — consumer-facing documentation of each extra.
+- `docs/public-api.md` §"Optional functionality" — what each extra enables at the API level.
 
 ---
 
@@ -378,6 +485,7 @@ Before merging any dependency update PR:
 | `docs/product-requirements.md` | What ForgeQA is building and why. |
 | `docs/architecture.md` | System context, container diagrams, dependency rules. |
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
+| `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -408,6 +516,7 @@ Before tagging a release:
 - [ ] MyPy passes.
 - [ ] `python -m build` succeeds without warnings.
 - [ ] The built `.whl` installs in a clean environment.
+- [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
 - [ ] Version is bumped in `pyproject.toml` and `src/forgeqa/__init__.py`.
 - [ ] Git tag is created (`v0.1.0`).
@@ -422,3 +531,4 @@ Before tagging a release:
 | 0.1.0 | 2026-10-27 | Solo Dev | Initial engineering standards created. |
 | 0.1.1 | 2026-10-27 | Solo Dev | Added "Supported Python Versions" section (WBS 0.5.1). |
 | 0.1.2 | 2026-10-27 | Solo Dev | Added "Build Verification" and "PyPI Classifiers" sections (WBS 0.5.2). |
+| 0.1.3 | 2026-10-28 | Solo Dev | Added §4.11 "Dependency Groups and Verification" (WBS 1.1.3); documented the constraint-style reconciliation as a Phase 1 follow-up; added `docs/public-api.md` to the Documentation Standards table; added `make verify-deps` to the Release Checklist. |
