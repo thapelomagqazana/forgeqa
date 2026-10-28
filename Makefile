@@ -49,7 +49,7 @@ help:
 	@echo "  make test-cov           Run tests with coverage report"
 	@echo ""
 	@echo "Build:"
-	@echo "  make build              Build wheel and sdist"
+	@echo "  make build              Build wheel and sdist, then twine check"
 	@echo "  make verify             Install built wheel in a clean env and verify"
 	@echo "  make clean              Remove build artifacts and caches"
 	@echo ""
@@ -163,7 +163,10 @@ test-cov:
 .PHONY: build
 build: clean
 	@echo "Building wheel and sdist..."
-	$(PYTHON) -m build
+	$(VENV_PYTHON) -m build
+	@echo ""
+	@echo "Checking package metadata..."
+	$(VENV_PYTHON) -m twine check $(DIST_DIR)/*
 	@echo ""
 	@echo "Build artifacts:"
 	@ls -la $(DIST_DIR)
@@ -192,8 +195,9 @@ verify:
 .PHONY: clean
 clean:
 	@echo "Removing build artifacts and caches..."
-	rm -rf $(DIST_DIR) build/ *.egg-info $(ARTIFACTS_DIR)
-	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov/
+	rm -rf $(DIST_DIR) build/
+	find . -maxdepth 3 -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+	rm -rf $(ARTIFACTS_DIR) .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov/
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Clean complete."
