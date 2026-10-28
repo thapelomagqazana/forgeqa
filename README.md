@@ -304,6 +304,7 @@ pip install -e ".[dev]"
 | `make test-unit` | Run unit tests only. |
 | `make test-cov` | Run tests with coverage. |
 | `make build` | Build wheel and sdist. |
+| `make verify-build` | Verify the wheel and sdist contain exactly the intended files (isolated build, archive inspection). |
 | `make verify-deps` | Verify `[ui]` / `[api]` / `[all]` / `[dev]` extras install exactly what they promise (isolated venvs). |
 | `make ci` | Run the full CI pipeline locally. |
 | `make adr-new TITLE="..."` | Create a new ADR. |

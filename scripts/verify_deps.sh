@@ -40,6 +40,12 @@
 #   cannot leak into each other.
 # - Uses `python -m pip` (not bare `pip`) to avoid PATH ambiguity when a venv
 #   is active in the parent shell.
+# - Diagnostic output (log, info, pass) is written to **stderr**, so that a
+#   future `$(run_* ...)` capture sees only data. This is the standard shell
+#   rule: stdout is data, stderr is diagnostics.
+# - `make_venv` is invoked inside `$(...)`; its exit status is checked in
+#   the caller so a `fail` inside the subshell stops the script rather than
+#   leaving the caller with an empty `${py}` path.
 # - Exits non-zero on the first failure with a clear diagnostic block.
 # - Runs under `set -euo pipefail` so a mid-script failure cannot leave a
 #   half-built state.
@@ -94,9 +100,13 @@ ALL_SCENARIOS=(core ui api all dev)
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-log()   { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-info()  { printf '    %s\n' "$*"; }
-pass()  { printf '    \033[32mPASS\033[0m\n'; }
+# All diagnostics go to stderr (>&2). stdout is reserved for data that the
+# caller captures with $(...). Mixing the two is a well-known shell bug:
+# a future `results="$(run_core ...)"` would otherwise capture the progress
+# lines along with the exit status, and parse the wrong content.
+log()   { printf '\n\033[1m==> %s\033[0m\n' "$*" >&2; }
+info()  { printf '    %s\n' "$*" >&2; }
+pass()  { printf '    \033[32mPASS\033[0m\n' >&2; }
 fail()  {
     printf '\n\033[31m[FAIL]\033[0m %s\n' "$*" >&2
     exit 1
@@ -113,12 +123,35 @@ require_python() {
         || fail "${PYTHON_BIN} is not Python >= 3.11."
 }
 
-# Create a throwaway venv at the given path. Echoes the venv's python path.
+# Create a throwaway venv at the given path. Echoes the venv's python path
+# on stdout (data); all diagnostics go to stderr.
+#
+# IMPORTANT: called as `py="$(make_venv ...)"`, so:
+#   - stdout must contain **only** the python path (no diagnostics)
+#   - a `fail` inside this function exits the subshell only, not the parent;
+#     callers must check the subshell's exit code (see `make_venv_or_fail`).
 make_venv() {
     local path="$1"
     rm -rf "${path}"
     "${PYTHON_BIN}" -m venv "${path}" >/dev/null
-    echo "${path}/bin/python"
+    printf '%s\n' "${path}/bin/python"
+}
+
+# Wrapper around make_venv that checks the subshell's exit code and fails
+# loudly in the parent if the venv could not be created. Use this instead
+# of `py="$(make_venv ...)"` everywhere — it is the only correct way to
+# call make_venv without inheriting the "exit inside $(...) exits the
+# subshell only" trap.
+make_venv_or_fail() {
+    local path="$1"
+    local py
+    if ! py="$(make_venv "${path}")"; then
+        fail "Failed to create venv at ${path}."
+    fi
+    if [[ -z "${py}" ]]; then
+        fail "make_venv returned an empty python path for ${path}."
+    fi
+    printf '%s\n' "${py}"
 }
 
 # Install a wheel from ${DIST_DIR} into the given venv with the given extras
@@ -178,8 +211,8 @@ PY
 run_core() {
     log "Scenario: core install (no extras) — expect: no playwright, no httpx"
     local py wheel
-    py="$(make_venv "${VENV_ROOT}/core")"
     wheel="$1"
+    py="$(make_venv_or_fail "${VENV_ROOT}/core")"
     install_wheel "${py}" "" "${wheel}"
     assert_not_installed "${py}" "playwright"
     assert_not_installed "${py}" "httpx"
@@ -191,8 +224,8 @@ run_core() {
 run_ui() {
     log "Scenario: forgeqa[ui] — expect: playwright installed, httpx absent"
     local py wheel
-    py="$(make_venv "${VENV_ROOT}/ui")"
     wheel="$1"
+    py="$(make_venv_or_fail "${VENV_ROOT}/ui")"
     install_wheel "${py}" "[ui]" "${wheel}"
     assert_installed "${py}" "playwright"
     assert_not_installed "${py}" "httpx"
@@ -204,8 +237,8 @@ run_ui() {
 run_api() {
     log "Scenario: forgeqa[api] — expect: httpx installed, playwright absent"
     local py wheel
-    py="$(make_venv "${VENV_ROOT}/api")"
     wheel="$1"
+    py="$(make_venv_or_fail "${VENV_ROOT}/api")"
     install_wheel "${py}" "[api]" "${wheel}"
     assert_installed "${py}" "httpx"
     assert_not_installed "${py}" "playwright"
@@ -216,8 +249,8 @@ run_api() {
 run_all() {
     log "Scenario: forgeqa[all] — expect: playwright and httpx both installed"
     local py wheel
-    py="$(make_venv "${VENV_ROOT}/all")"
     wheel="$1"
+    py="$(make_venv_or_fail "${VENV_ROOT}/all")"
     install_wheel "${py}" "[all]" "${wheel}"
     assert_installed "${py}" "playwright"
     assert_installed "${py}" "httpx"
@@ -228,8 +261,8 @@ run_all() {
 run_dev() {
     log "Scenario: forgeqa[dev] — expect: neither playwright nor httpx (dev is tooling only)"
     local py wheel
-    py="$(make_venv "${VENV_ROOT}/dev")"
     wheel="$1"
+    py="$(make_venv_or_fail "${VENV_ROOT}/dev")"
     install_wheel "${py}" "[dev]" "${wheel}"
     assert_not_installed "${py}" "playwright"
     assert_not_installed "${py}" "httpx"

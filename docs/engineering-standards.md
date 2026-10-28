@@ -73,6 +73,12 @@ python -c "import forgeqa; print(forgeqa.__version__)"
 
 This verification is repeated in CI (WBS 0.5.7) on every pull request to ensure the package remains installable.
 
+> **Superseded by §4.12.** The three-command workflow above verifies that
+> the wheel *installs* and `forgeqa.__version__` is queryable. It does **not**
+> verify what the wheel and sdist *contain* — that is a separate contract
+> (WBS 1.1.4) documented in §4.12. The install check remains valid and is
+> folded into the CI pipeline; the content inspection is additive.
+
 ### 1.7 PyPI Classifiers
 
 The following classifiers are used in `pyproject.toml`. All classifiers must be selected from the [official PyPI classifier list](https://pypi.org/classifiers/). Inventing new classifiers will cause the build to fail.
@@ -331,6 +337,7 @@ Configuration file: `.github/dependabot.yml`.
 | **pytest-cov** | Dev | Test coverage. | `>=5.0.0` | 3.8+ |
 | **coverage[toml]** | Dev | Coverage data (TOML support). | `>=7.6.0` | 3.8+ |
 | **pre-commit** | Dev | Git hook management. | `>=3.8.0` | 3.9+ |
+| **packaging** | Dev | PEP 440 version-specifier comparison (used by `scripts/verify_deps.sh`). | `>=23.0` | 3.8+ |
 
 > **Note**: Python support columns are based on the dependency's own `requires-python` metadata. They are verified during the review process (Step 3 in 4.6).
 
@@ -463,6 +470,139 @@ interpreter (used by the CI matrix).
 - `README.md` §"Optional extras" — consumer-facing documentation of each extra.
 - `docs/public-api.md` §"Optional functionality" — what each extra enables at the API level.
 
+### 4.12 Built Artifact Content Inspection
+
+The wheel and sdist are part of the public contract, not incidental
+by-products. The wheel is what `pip install forgeqa` consumes from PyPI;
+the sdist is what `pip install forgeqa --no-binary :all:` consumes (and
+what some downstream packagers use). Both must contain exactly the
+intended files and nothing else.
+
+#### Rules
+
+1. **The wheel contains only the package.** Specifically:
+   - `forgeqa/__init__.py` (and all modules under `forgeqa/`)
+   - `forgeqa-X.Y.Z.dist-info/METADATA`, `WHEEL`, `RECORD`
+   - `forgeqa-X.Y.Z.dist-info/licenses/LICENSE`
+
+   It must **not** contain `tests/`, `docs/`, `examples/`, `scripts/`,
+   `*.egg-info/`, `__pycache__/`, or `*.pyc`. Enforced by
+   `tests/unit/test_build_config.py` (config-level) and
+   `scripts/verify_build.sh` (end-to-end, inspects the built archive).
+
+2. **The sdist contains the source tree.** Specifically:
+   - `src/forgeqa/`, `tests/`, `docs/`
+   - `README.md`, `LICENSE`, `pyproject.toml`
+
+   It must **not** contain `dist/`, `build/`, `.venv/`, `*.egg-info/`,
+   `__pycache__/`, or `*.pyc`. Enforced by
+   `tests/unit/test_build_config.py` and `scripts/verify_build.sh`.
+
+3. **`LICENSE` is bundled into the wheel** via
+   `[project].license = { file = "LICENSE" }`. Switching to
+   `license = { text = "MIT" }` (a small, well-intentioned edit for
+   PEP 639 migration) would silently drop the file from the wheel and
+   violate WBS 1.1.4. Enforced by
+   `tests/unit/test_build_config.py::test_license_file_is_declared_for_bundling`.
+
+4. **Build targets are explicit.** `[tool.hatch.build.targets.wheel]`
+   and `[tool.hatch.build.targets.sdist]` each declare
+   `packages`/`include` *and* `exclude`. Hatchling's defaults are
+   permissive; explicit is auditable. Enforced by
+   `tests/unit/test_build_config.py`.
+
+5. **Evolving the build contract means updating four files in one PR:**
+   1. `pyproject.toml` — add/change the `include`/`exclude` entry.
+   2. `scripts/verify_build.sh` — add the corresponding pattern to
+      `WHEEL_REQUIRED`, `WHEEL_FORBIDDEN`, `SDIST_REQUIRED`, or
+      `SDIST_FORBIDDEN`.
+   3. `tests/unit/test_build_config.py` — assert the config-level
+      shape (or extend an existing assertion).
+   4. `docs/engineering-standards.md` (this section) — update the
+      contract if the intent changes.
+
+   Missing any of these means the contract is documented but not
+   enforced (or enforced but not documented). The `pyproject.toml`
+   comment block above `[tool.hatch.build.targets.wheel]` mirrors the
+   verifier's pattern arrays so a reviewer sees the same contract in
+   both places.
+
+6. **Do not use `setup.py` to inspect or modify the archive.**
+   `python -m build` is the PEP 517 standard; any post-build step that
+   mutates the wheel outside `pyproject.toml` is hidden from the config
+   and from downstream packagers. If a file must not be in the wheel,
+   exclude it in `[tool.hatch.build.targets.wheel].exclude` — not by
+   deleting it after the build.
+
+#### Verification
+
+Two layers, both required:
+
+1. **Config-level (fast, in-process).**
+   `tests/unit/test_build_config.py` parses `pyproject.toml` and
+   asserts the build-target shape:
+   - wheel target declares `packages = ["src/forgeqa"]`
+   - wheel exclude list contains `tests`, `docs`, `examples`, `scripts`
+   - sdist include list contains `src`, `tests`, `docs`,
+     `README.md`, `LICENSE`, `pyproject.toml`
+   - sdist exclude list contains `dist`, `build`, `.venv`,
+     `*.egg-info`, `__pycache__`
+   - `[project].license` references the `LICENSE` file
+
+   Runs in <100 ms as part of `make test`.
+
+2. **End-to-end (slow, isolated).**
+   `scripts/verify_build.sh` (or `make verify-build`) runs
+   `python -m build` into a fresh temp directory (not `dist/`), then:
+   - Lists the wheel with `unzip -l` and asserts required entries are
+     present (`forgeqa/__init__.py`,
+     `forgeqa-X.Y.Z.dist-info/licenses/LICENSE`, `METADATA`, `WHEEL`).
+   - Asserts forbidden entries are absent from the wheel (`tests/`,
+     `docs/`, `examples/`, `scripts/`, `*.egg-info/`,
+     `__pycache__/`, `*.pyc`).
+   - Lists the sdist with `tar -tzf` and asserts the source tree,
+     tests, docs, and metadata files are present.
+   - Asserts build artifacts are absent from the sdist (`dist/`,
+     `build/`, `.venv/`, `*.egg-info/`, `__pycache__/`, `*.pyc`).
+
+Neither layer is sufficient alone:
+
+- Config-only verification cannot prove what hatchling's VCS-aware
+  file selection actually includes in the archive. The negative
+  assertion ("wheel does not contain tests/") is exactly the kind a
+  config read cannot prove.
+- End-to-end-only verification makes `make test` slow for every
+  contributor on every change.
+
+Both run in CI on Ubuntu and macOS, on Python 3.11 and 3.12.
+
+#### Running the verification
+
+```bash
+# Fast, config-only
+pytest tests/unit/test_build_config.py -v
+
+# Slow, end-to-end (full: wheel + sdist)
+make verify-build
+
+# Slow, end-to-end (wheel or sdist only)
+./scripts/verify_build.sh wheel
+./scripts/verify_build.sh sdist
+
+# Debug a failing inspection
+KEEP_BUILD=1 ./scripts/verify_build.sh
+```
+
+`PYTHON_BIN=python3.12 ./scripts/verify_build.sh` selects a specific
+interpreter (used by the CI matrix).
+
+#### See also
+
+- [ADR-004](../adr/ADR-004-verify-built-artifacts-contain-intended-files.md) — decision record for this verification strategy.
+- `pyproject.toml` `[tool.hatch.build.targets]` — the build config and its content-contract comment block.
+- `scripts/verify_build.sh` — the end-to-end verifier.
+- `tests/unit/test_build_config.py` — the config-level complement.
+
 ---
 
 ## 5. Security & Secret Handling
@@ -515,6 +655,7 @@ Before tagging a release:
 - [ ] Ruff lint and format checks pass.
 - [ ] MyPy passes.
 - [ ] `python -m build` succeeds without warnings.
+- [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -532,3 +673,4 @@ Before tagging a release:
 | 0.1.1 | 2026-10-27 | Solo Dev | Added "Supported Python Versions" section (WBS 0.5.1). |
 | 0.1.2 | 2026-10-27 | Solo Dev | Added "Build Verification" and "PyPI Classifiers" sections (WBS 0.5.2). |
 | 0.1.3 | 2026-10-28 | Solo Dev | Added §4.11 "Dependency Groups and Verification" (WBS 1.1.3); documented the constraint-style reconciliation as a Phase 1 follow-up; added `docs/public-api.md` to the Documentation Standards table; added `make verify-deps` to the Release Checklist. |
+| 0.1.4 | 2026-10-28 | Solo Dev | Added §4.12 "Built Artifact Content Inspection" (WBS 1.1.4); marked §1.6 as superseded by §4.12; added `make verify-build` to the Release Checklist; added `packaging` to the Dependency Inventory (from WBS 1.1.3's `[dev]` addition). |

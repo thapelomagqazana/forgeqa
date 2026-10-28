@@ -8,3 +8,4 @@
 | [001](ADR-001-adopt-mit-license-file-and-pep-621-compliant-package-metadata.md) | Adopt MIT license file and PEP 621-compliant package metadata | Accepted | 2026-10-28 |
 | [002](ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md) | Resolve package version at import time via importlib.metadata and keep top-level imports dependency-free | Accepted | 2026-10-28 |
 | [003](ADR-003-verify-optional-dependency-groups-via-an-isolated-venv-script-in-ci.md) | Verify optional dependency groups via an isolated-venv script in CI | Accepted | 2026-10-28 |
+| [004](ADR-004-verify-built-artifacts-contain-exactly-the-intended-files-using-isolated-inspection-in-ci.md) | Verify built artifacts contain exactly the intended files, using isolated inspection in CI | Accepted | 2026-10-28 |
