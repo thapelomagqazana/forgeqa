@@ -157,6 +157,11 @@ test-cov:
 	@echo "Running tests with coverage..."
 	pytest --cov=$(SRC_DIR)/$(PROJECT_NAME) --cov-report=term-missing --cov-report=html
 
+.PHONY: verify-version
+verify-version:
+	@echo "Verifying version consistency..."
+	pytest tests/unit/test_version.py -v
+
 .PHONY: verify-deps
 verify-deps:
 	@echo "Verifying optional dependency groups in isolated venvs..."
@@ -265,7 +270,7 @@ hooks-update:
 # CI (full pipeline)
 # =============================================================================
 .PHONY: ci
-ci: check adr test build verify verify-deps verify-build verify-install
+ci: check adr test build verify verify-deps verify-build verify-install verify-public-api verify-version
 	@echo ""
 	@echo "Full CI pipeline passed."
 

@@ -14,10 +14,16 @@ The companion documents are:
 
 - [`ADR-002`](adr/ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md)
   — why the top-level module is kept free of optional dependencies.
+- [`ADR-006`](adr/ADR-006-formalise-public-api-surface-and-private-module-convention.md)
+  — the decision record for this contract (the `_`-prefix rule and the
+  semver promise).
 - [`docs/engineering-standards.md`](engineering-standards.md) — the rules
-  contributors follow to keep this contract intact.
-- [`tests/unit/test_import.py`](../tests/unit/test_import.py) — the executable
-  form of every guarantee below.
+  contributors follow to keep this contract intact (§4.14 is the
+  contributor-facing counterpart to this document).
+- [`tests/unit/test_import.py`](../tests/unit/test_import.py) — the
+  executable form of the import-time guarantees below.
+- [`tests/unit/test_public_api.py`](../tests/unit/test_public_api.py) —
+  the executable form of the public-surface contract below.
 
 ---
 
@@ -33,13 +39,25 @@ forgeqa.__all__  # tuple[str, ...], the names below
 
 ### The public surface of `forgeqa`
 
-| Name | Kind | Description |
-| :--- | :--- | :--- |
-| `forgeqa.__version__` | `str` | The PEP 440 version string of the installed `forgeqa` distribution, or `"0.0.0+unknown"` when running from an uninstalled source checkout (see "Version resolution" below). |
-| `forgeqa.get_version()` | `() -> str` | Recommended accessor; returns the same value as `__version__`. Preferred in reports, logs, and artifacts because it insulates callers from a future refactor where `__version__` may become lazily evaluated. |
-| `forgeqa.__all__` | `tuple[str, ...]` | The names above. Immutable. Adding a name is semver-minor. |
+**As of 0.1.0 (pre-alpha), the entire public API of ForgeQA consists of
+the following names, importable from the top-level `forgeqa` package.**
+Everything else — fixtures, settings, adapters, reporting — lands in
+Phase 1 (MVP) and will be added to this document (and to
+`forgeqa.__all__`) in the same PR that ships it.
+
+| Name | Kind | Since | Description |
+| :--- | :--- | :--- | :--- |
+| `forgeqa.__version__` | `str` | 0.1.0 | The PEP 440 version string of the installed `forgeqa` distribution, or `"0.0.0+unknown"` when running from an uninstalled source checkout (see "Version resolution" below). |
+| `forgeqa.get_version()` | `() -> str` | 0.1.0 | Recommended accessor; returns the same value as `__version__`. Preferred in reports, logs, and artifacts because it insulates callers from a future refactor where `__version__` may become lazily evaluated. |
+| `forgeqa.__all__` | `tuple[str, ...]` | 0.1.0 | The names above. Immutable (a `tuple`, not a `list`). Adding a name is semver-minor. |
 
 `forgeqa.__all__ == ("__version__", "get_version")`.
+
+This is verified by
+`tests/unit/test_public_api.py::test_all_matches_documented_surface`
+(which asserts the tuple against a **test-authoritative**
+`EXPECTED_ALL` constant, so a change to `forgeqa.__all__` without a
+change to the test and this document fails CI).
 
 ### Guarantees
 
@@ -79,6 +97,21 @@ These guarantees are enforced by `tests/unit/test_import.py`:
 | Import is fast | `test_import_is_fast` |
 | Deterministic across runs | `test_import_is_deterministic_across_runs` |
 | No import-time warnings | `test_import_does_not_emit_warnings` |
+
+The public-vs-internal contract is enforced by
+`tests/unit/test_public_api.py`:
+
+| Contract | Test |
+| :--- | :--- |
+| `__all__` matches the documented surface | `test_all_matches_documented_surface` |
+| `__all__` is a tuple (immutable) | `test_all_is_immutable_tuple` |
+| Every documented name is accessible | `test_documented_names_are_accessible` |
+| `get_version() == __version__` | `test_get_version_matches_dunder_version` |
+| No `_`-prefixed name in `__all__` (parametrised) | `test_private_name_not_in_all[4 params]` |
+| No `_`-prefixed name in `__all__` (structural) | `test_no_underscore_name_in_all` |
+| No `_`-prefixed submodule imported by `__init__.py` (source) | `test_no_private_module_in_source_tree_top_level` |
+| No `_`-prefixed submodule in `sys.modules` after import (runtime) | `test_no_private_submodule_imported_by_top_level` |
+| The doc itself states the `_`-prefix rule | `test_public_api_doc_exists_and_mentions_underscore_rule` |
 
 ---
 
@@ -150,11 +183,19 @@ corresponding optional extras.
 > breaks the isolation guarantee above. The submodule is loaded only when the
 > caller actually asks for the fixture or the settings loader.
 
-When these submodules land, each name they expose will be added to the
-relevant submodule's `__all__` and documented in a section here, in the same
-PR, with a changelog note. See ADR-002 §Reconsideration Trigger for the
-lazy-re-export pattern (PEP 562 `__getattr__`) if a future API wants
+When these submodules land, each will:
+
+- Be a top-level module (not `_`-prefixed) — so
+  `from forgeqa.fixtures import browser` is a stable import path.
+- Have its own `__all__` listing exactly what it exports publicly.
+- Be added to `PUBLIC_SUBMODULES` in
+  `tests/unit/test_public_api.py`, so its `__all__` is asserted.
+- Be documented in a new subsection here, in the same PR.
+
+See ADR-002 §Reconsideration Trigger for the lazy-re-export pattern
+(PEP 562 `__getattr__`) if a future API wants
 `from forgeqa import Settings` to work without importing Pydantic eagerly.
+That decision is not made yet.
 
 ---
 
@@ -163,25 +204,62 @@ lazy-re-export pattern (PEP 562 `__getattr__`) if a future API wants
 The following are **not** part of the contract and may change at any time,
 including in patch releases, without notice:
 
-- Any name starting with `_` — e.g. `_resolve_version`,
-  `_is_version_fallback`, `_DISTRIBUTION_NAME`, `_FALLBACK_VERSION`,
-  `_IS_FALLBACK_VERSION`.
-- Any module-level attribute not listed in `forgeqa.__all__` — e.g.
-  `forgeqa.__author__`, `forgeqa.__license__` (these are kept for diagnostics
-  and for `help(forgeqa)` output; they are not API).
-- The internal layout of `src/forgeqa/` — e.g. private submodules named
-  `forgeqa._internal`, `forgeqa._compat`. Import from `forgeqa` or from
-  documented submodules, never from `forgeqa._*`.
-- The exact value of `"0.0.0+unknown"` (in the fallback case) — treat it as
-  "not a real version" and do not pattern-match against the literal.
-- The behaviour of `import forgeqa` under exotic installs (zip-import,
-  namespace packages spanning multiple roots). These are not supported for
-  ForgeQA itself; sub-modules may document their own behaviour later.
+1. **Any name starting with a single underscore** — e.g.
+   `_resolve_version`, `_is_version_fallback`, `_DISTRIBUTION_NAME`,
+   `_FALLBACK_VERSION`, `_IS_FALLBACK_VERSION`. The leading underscore
+   is the standard Python convention for "internal use only", and
+   ForgeQA treats it as a contract: any name or module prefixed with
+   `_` is private.
 
-If you have a use case that requires relying on something in this list, please
-open an issue — either the thing should be promoted to the public API (a
-documented, versioned change) or there is a supported alternative that we
-should document instead.
+2. **Any module under a `_`-prefixed subpackage** — e.g.
+   `forgeqa._internal`, `forgeqa._compat`,
+   `forgeqa._adapters.playwright`, `forgeqa._reporting.junit`. The
+   entire `_adapters` and `_reporting` trees are private. Import from
+   `forgeqa` or from a documented public submodule, never from a
+   private path.
+
+3. **Any module-level attribute not listed in `forgeqa.__all__`** —
+   e.g. `forgeqa.__author__`, `forgeqa.__license__` (these are kept
+   for diagnostics and for `help(forgeqa)` output; they are not API).
+
+4. **The internal layout of `src/forgeqa/`** — the directory structure
+   (whether `src/` or flat, whether `_adapters/` or `adapters/`) is an
+   implementation detail.
+
+5. **The exact value of `"0.0.0+unknown"`** (in the fallback case) —
+   treat it as "not a real version" and do not pattern-match against
+   the literal. The *fact* that a fallback exists is public; its
+   literal value is not.
+
+6. **The behaviour of `import forgeqa` under exotic installs**
+   (zip-import, namespace packages spanning multiple roots). These are
+   not supported for ForgeQA itself; sub-modules may document their
+   own behaviour later.
+
+### Why the `_`-prefix rule
+
+Python's PEP 8 style guide has recommended a leading underscore for
+"internal use only" names since the language was standardised. ForgeQA
+treats that recommendation as a **contract**:
+
+- `_name` (single underscore, module-level) is private per PEP 8.
+- `__name` (double underscore, class-level) is name-mangled; not
+  relevant to module imports.
+- `__name__` (dunder) is used for special methods and
+  interpreter-defined attributes. In ForgeQA, `__version__` is a
+  **public** dunder because it is documented here and appears in
+  `forgeqa.__all__`. All other dunders are implementation detail.
+
+The rule is enforced by `tests/unit/test_public_api.py` on four axes:
+membership in `__all__` (`test_private_name_not_in_all`), structure
+(`test_no_underscore_name_in_all`), source (`test_no_private_module_in_source_tree_top_level`),
+and runtime (`test_no_private_submodule_imported_by_top_level`). If a
+future change breaks any of these, CI fails.
+
+**If you have a use case that requires relying on something in this
+list, please open an issue** — either the thing should be promoted to
+the public API (a documented, versioned change) or there is a supported
+alternative that we should document instead.
 
 ---
 
@@ -211,6 +289,40 @@ should document instead.
 | Add a new documented submodule (`forgeqa.fixtures`, `forgeqa.api`, …) | minor |
 | Change import-time guarantees (e.g. begin importing Playwright at top level) | major (would be a breaking change for consumers without the `ui` extra). |
 | Add a top-level warning at import | major (it would break `-W error` consumers). |
+| Move a public name into a `_`-prefixed module | major (would break anyone importing the public name). |
+| Rename a public submodule to a `_`-prefixed one | major (would break anyone importing the submodule). |
+
+---
+
+## How this contract is enforced
+
+This document is the human-readable contract. Four tools enforce the
+machine-readable form on every pull request:
+
+1. **`tests/unit/test_public_api.py`** — asserts `__all__` matches
+   `EXPECTED_ALL` (a test-authoritative constant, not imported from
+   `forgeqa`, so a change to `forgeqa.__all__` without a change to the
+   test fails). Also asserts the `_`-prefix rule on four axes, that
+   `get_version() == __version__`, and that this document exists and
+   states the rule. Runs in ~50 ms; also invocable as
+   `make verify-public-api`.
+
+2. **`tests/unit/test_import.py`** — asserts the import-time
+   guarantees: cheap, side-effect free, deterministic, idempotent, no
+   warnings, no optional dependency imported at top level. Runs in
+   ~1 s as part of `make test`.
+
+3. **`scripts/verify_build.sh`** — asserts the wheel contains the
+   package and `LICENSE`, and does not contain `tests/`, `docs/`, or
+   any `_`-prefixed top-level module. Runs in ~10 s; `make verify-build`.
+
+4. **`scripts/verify_install.sh`** — asserts the wheel installs in a
+   fresh venv and `import forgeqa` resolves outside the source tree.
+   Runs in ~20 s; `make verify-install`.
+
+`make ci` runs all four. `make verify-public-api` runs only the
+public-API contract test (~50 ms) for quick local iteration or as a
+pre-commit hook.
 
 ---
 
@@ -227,12 +339,11 @@ Playwright, it emits a warning, or `forgeqa.__version__` disagrees with
    `import forgeqa` (redact anything sensitive).
 4. The Python version and platform.
 
-Every guarantee in this document is covered by a test in
-`tests/unit/test_import.py`. A regression that violates the contract should
-be caught by CI; a user-visible failure therefore usually indicates an
-environment problem (editable install drift, a stale `.venv`, or an
-interpreter-level `-W error` flag), which the four diagnostics above will
-identify.
+Every guarantee in this document is covered by a test. A regression that
+violates the contract should be caught by CI; a user-visible failure
+therefore usually indicates an environment problem (editable install drift,
+a stale `.venv`, or an interpreter-level `-W error` flag), which the four
+diagnostics above will identify.
 
 ---
 
@@ -241,11 +352,18 @@ identify.
 - [`README.md`](../README.md) — project overview and Quick Start.
 - [`docs/architecture.md`](architecture.md) — system architecture and
   dependency rules.
-- [`docs/engineering-standards.md`](engineering-standards.md) — "Public API
-  import isolation" rules for contributors.
+- [`docs/engineering-standards.md`](engineering-standards.md) — the
+  contributor-facing rules, including §4.14 "Public vs. Internal Module
+  Conventions".
 - [`docs/adr/ADR-001`](adr/ADR-001-adopt-mit-license-file-and-pep-621-compliant-package-metadata.md)
   — package metadata baseline.
 - [`docs/adr/ADR-002`](adr/ADR-002-resolve-package-version-at-import-time-via-importlib-metadata-and-keep-top-level-imports-dependency-free.md)
   — version resolution and import isolation.
-- [`tests/unit/test_import.py`](../tests/unit/test_import.py) — executable
-  contract.
+- [`docs/adr/ADR-005`](adr/ADR-005-verify-installed-wheel-outside-source-tree.md)
+  — clean install (the consumer-facing side of `scripts/verify_install.sh`).
+- [`docs/adr/ADR-006`](adr/ADR-006-formalise-public-api-surface-and-private-module-convention.md)
+  — this contract.
+- [`tests/unit/test_import.py`](../tests/unit/test_import.py) — the
+  executable form of the import-time guarantees.
+- [`tests/unit/test_public_api.py`](../tests/unit/test_public_api.py) —
+  the executable form of the public-surface contract.

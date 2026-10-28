@@ -71,17 +71,36 @@ def test_init_exposes_version_and_get_version() -> None:
 
 
 def test_init_all_matches_documented_surface() -> None:
-    """Given ``__all__``, when inspected, then it is exactly ``("__version__", "get_version")``.
+    """Given ``__all__``, when inspected, then it matches the documented public surface.
 
-    The contract from WBS 1.1.2 / ADR-002. Adding a name to ``__all__`` is a
-    semver-minor event; this test fails loudly if someone does it without
-    updating ``docs/public-api.md``.
+    The expected surface is defined in ``tests/unit/test_public_api.py`` as
+    ``EXPECTED_ALL``. Importing it here rather than duplicating the tuple
+    means the two tests share a single source of truth: if a public name is
+    added or removed, updating ``EXPECTED_ALL`` (and ``docs/public-api.md``
+    and ``forgeqa.__all__``) is enough — this test does not need a parallel
+    edit. Duplication of the *expected value* would be a maintenance trap.
+
+    The test in ``test_public_api.py`` (``test_all_matches_documented_surface``)
+    remains the authoritative one; this test is a fast sanity check that
+    also runs as part of ``make test`` without needing the public-API
+    test's subprocess work.
     """
+    # Imported at call time (not module load) to keep this test independent
+    # of collection order across the test suite.
+    from tests.unit.test_public_api import EXPECTED_ALL  # noqa: PLC0415
+
     sys.path.insert(0, str(SRC_DIR))
     try:
         import forgeqa  # noqa: PLC0415
 
-        assert forgeqa.__all__ == ("__version__", "get_version")
+        assert forgeqa.__all__ == EXPECTED_ALL, (
+            f"forgeqa.__all__ drifted from the documented surface.\n"
+            f"  expected: {EXPECTED_ALL}\n"
+            f"  actual:   {forgeqa.__all__}\n"
+            f"Update docs/public-api.md, tests/unit/test_public_api.py's "
+            f"EXPECTED_ALL, and src/forgeqa/__init__.py's __all__ in the "
+            f"same PR."
+        )
     finally:
         sys.path.remove(str(SRC_DIR))
         for name in list(sys.modules):

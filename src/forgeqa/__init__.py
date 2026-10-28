@@ -6,6 +6,22 @@ maintaining automated tests across UI, API, and CI/CD workflows.
 For more information, see the project documentation:
 https://github.com/thapelomagqazana/forgeqa
 
+The full public API contract — what you can rely on, what you cannot, and
+how ForgeQA evolves the boundary — is documented in ``docs/public-api.md``
+(see ADR-006 for the decision record). In summary:
+
+* Names in :data:`__all__` are public. Currently ``__version__`` and
+  ``get_version``.
+* Any name or submodule starting with a single underscore
+  (``forgeqa._internal``, ``forgeqa._config``, …) is **private** and may
+  change without a deprecation cycle. Importing a private name is
+  unsupported.
+* Public submodules (``forgeqa.fixtures``, ``forgeqa.settings``, …) are
+  added in Phase 1 and documented in ``docs/public-api.md`` at the same
+  time as they are added to :data:`__all__`.
+
+The rule is enforced by ``tests/unit/test_public_api.py`` on every PR.
+
 Design constraints (see ``docs/public-api.md`` and ``ADR-002``):
 
 1. **Zero-cost import.** Importing :mod:`forgeqa` must not require Playwright
@@ -160,6 +176,12 @@ and must be accompanied by a documentation update in ``docs/public-api.md``
 and a note in the changelog at release time. The tuple is immutable on
 purpose — a mutable ``list`` would let consumers widen the contract at
 runtime by accident.
+
+Enforced by ``tests/unit/test_public_api.py::test_all_matches_documented_surface``,
+which compares this tuple against a test-authoritative ``EXPECTED_ALL``
+constant (not against ``forgeqa.__all__`` itself, which would be a
+tautology). A drift between this tuple, ``docs/public-api.md``, and
+``EXPECTED_ALL`` fails CI.
 """
 
 
