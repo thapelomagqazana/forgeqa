@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Deliberate Failure - ForgeQA Reference App{% endblock %}
+
+{% block content %}
+<!-- ====================================================================== -->
+<!-- REF-09: Deliberate UI failure                                           -->
+<!-- ====================================================================== -->
+<section>
+    <h2 data-testid="failure-heading">This page intentionally fails</h2>
+    <p>
+        This page exists to test ForgeQA's screenshot and trace capture on failure.
+        Any test that asserts on this heading will fail deliberately.
+    </p>
+    <p>
+        <a href="/ui/records">Back to Records</a>
+    </p>
+</section>
+{% endblock %}

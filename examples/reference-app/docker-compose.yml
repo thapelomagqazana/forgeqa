@@ -1,0 +1,27 @@
+# =============================================================================
+# ForgeQA Reference Application - Docker Compose
+# =============================================================================
+# Usage:
+#   docker compose up -d     # Start
+#   docker compose down      # Stop
+#   docker compose logs -f   # View logs
+# =============================================================================
+
+services:
+  reference-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: forgeqa-reference-app:latest
+    container_name: forgeqa-reference-app
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
