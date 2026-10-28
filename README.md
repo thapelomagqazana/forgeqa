@@ -73,6 +73,12 @@ pip install forgeqa
 pip install forgeqa[all]
 ```
 
+> **Verified.** Every release runs `make verify-install` in CI, which
+> installs the built wheel in a fresh virtual environment (no editable
+> install, no `PYTHONPATH`) and asserts that `import forgeqa` works from
+> a directory outside the source tree. So if `pip install forgeqa` works
+> for us, it works for you.
+
 ### 1a. Optional extras
 
 ForgeQA's core install is intentionally lightweight: `pip install forgeqa`
@@ -304,6 +310,7 @@ pip install -e ".[dev]"
 | `make test-unit` | Run unit tests only. |
 | `make test-cov` | Run tests with coverage. |
 | `make build` | Build wheel and sdist. |
+| `make verify-install` | Install the wheel in a fresh venv and prove it works outside the source tree (isolated venv, temp cwd). |
 | `make verify-build` | Verify the wheel and sdist contain exactly the intended files (isolated build, archive inspection). |
 | `make verify-deps` | Verify `[ui]` / `[api]` / `[all]` / `[dev]` extras install exactly what they promise (isolated venvs). |
 | `make ci` | Run the full CI pipeline locally. |

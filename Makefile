@@ -199,6 +199,11 @@ verify-build:
 	@echo "Verifying build artifact contents..."
 	./scripts/verify_build.sh
 
+.PHONY: verify-install
+verify-install:
+	@echo "Verifying clean installation from built wheel..."
+	./scripts/verify_install.sh
+
 # =============================================================================
 # Clean
 # =============================================================================
@@ -260,7 +265,7 @@ hooks-update:
 # CI (full pipeline)
 # =============================================================================
 .PHONY: ci
-ci: check adr test build verify verify-deps verify-build
+ci: check adr test build verify verify-deps verify-build verify-install
 	@echo ""
 	@echo "Full CI pipeline passed."
 

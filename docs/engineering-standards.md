@@ -73,11 +73,13 @@ python -c "import forgeqa; print(forgeqa.__version__)"
 
 This verification is repeated in CI (WBS 0.5.7) on every pull request to ensure the package remains installable.
 
-> **Superseded by §4.12.** The three-command workflow above verifies that
-> the wheel *installs* and `forgeqa.__version__` is queryable. It does **not**
-> verify what the wheel and sdist *contain* — that is a separate contract
-> (WBS 1.1.4) documented in §4.12. The install check remains valid and is
-> folded into the CI pipeline; the content inspection is additive.
+> **Superseded by §4.12 and §4.13.** The three-command workflow above
+> verifies that the wheel *installs* and `forgeqa.__version__` is
+> queryable. It does **not** verify what the wheel and sdist *contain*
+> (WBS 1.1.4, §4.12), and it does **not** verify that the installed
+> wheel is *usable outside the source checkout* (WBS 1.1.5, §4.13).
+> Both checks are additive; the install check here remains valid and is
+> folded into the CI pipeline.
 
 ### 1.7 PyPI Classifiers
 
@@ -603,6 +605,119 @@ interpreter (used by the CI matrix).
 - `scripts/verify_build.sh` — the end-to-end verifier.
 - `tests/unit/test_build_config.py` — the config-level complement.
 
+### 4.13 Clean-Install Verification
+
+The wheel's content being correct (see §4.12) is necessary but not
+sufficient: the wheel must also *install* into a fresh environment and
+*work* from outside the source checkout. A developer's `.venv` cannot
+prove this — `pip install -e .` puts `src/` on `sys.path`, so the
+editable install shadows the wheel and any import succeeds regardless of
+whether the wheel is usable. Only a fresh venv, with no editable install
+and no `PYTHONPATH`, can prove the wheel works as a consumer will
+experience it.
+
+#### Rules
+
+1. **Install from the built wheel, not an editable tree.**
+   `pip install dist/forgeqa-*.whl` is what a PyPI consumer runs. `pip
+   install -e .` uses a different metadata path and does not prove the
+   wheel is self-contained.
+
+2. **Install into a fresh venv, not the developer's `.venv`.**
+   The developer's `.venv` almost certainly has `pip install -e .`
+   applied. Any test of "does the wheel install?" in that venv is
+   meaningless — the editable install shadows the wheel.
+
+3. **Run from a directory outside the source tree.**
+   Even inside a fresh venv, running `python -c "import forgeqa"` from
+   the repo root would put the current directory on `sys.path[0]`, and
+   `src/` is one `cd` away. The verifier runs from
+   `/tmp/forgeqa-verify-install-cwd.XXXXXX`.
+
+4. **Assert the import location, not just that import succeeds.**
+   `forgeqa.__file__` must resolve under the venv's `site-packages`.
+   This is the WBS acceptance criterion "package is importable without
+   the repo being on PYTHONPATH", made concrete.
+
+5. **Compare the installed version against the wheel's `METADATA`.**
+   A version mismatch means the installed package is not the wheel we
+   built. This catches an editable-install leak that the import-path
+   check might miss (e.g. a `.pth` file in a *parent* venv that puts
+   `src/` on `sys.path`).
+
+6. **Run `pytest` from the temp cwd against a real test file.**
+   A bare `pytest` from the temp cwd would collect nothing and pass
+   trivially. The verifier creates a `test_installed.py` with three
+   real assertions (import, version non-empty, `forgeqa.__file__` under
+   `site-packages`) and runs it.
+
+7. **Clean up.** The venv, temp cwd, and wheel dir are all
+   `trap`-cleaned on `EXIT INT TERM` unless `KEEP_INSTALL=1`.
+
+8. **`py.typed` is a contract.** The `Typing :: Typed` classifier in
+   `pyproject.toml` (present since 1.1.1) promises downstream users that
+   inline types are available. PEP 561 requires a `py.typed` marker in
+   the package for that promise to be honoured.
+   `tests/unit/test_install_contract.py::test_py_typed_marker_present`
+   enforces both sides (marker present, file empty).
+
+#### Verification
+
+Two layers, both required:
+
+1. **Config-level (fast, in-process).**
+   `tests/unit/test_install_contract.py` parses `src/forgeqa/__init__.py`
+   and `pyproject.toml`, and asserts:
+   - `__version__` and `get_version` are exposed
+   - `__all__ == ("__version__", "get_version")`
+   - no `sitecustomize.py` / `usercustomize.py` in the package
+   - `py.typed` marker is present and empty
+   - `Typing :: Typed` classifier is declared
+   - `forgeqa` is a package (directory + `__init__.py`), not a module
+   - no name in `__all__` collides with a stdlib module
+
+   Runs in <100 ms as part of `make test`.
+
+2. **End-to-end (slow, isolated).**
+   `scripts/verify_install.sh` (or `make verify-install`) builds a wheel
+   into a fresh temp dir, creates a fresh venv under `/tmp`, installs
+   the wheel with dependencies, asserts import works and
+   `forgeqa.__file__` is under `site-packages`, and runs a minimal
+   pytest suite from a temp cwd.
+
+Neither alone is sufficient: config-only cannot prove the wheel is
+installable and usable in a clean environment; end-to-end-only makes
+`make test` slow (a fresh venv + pip install is ~20 s).
+
+Both run in CI on Ubuntu and macOS, on Python 3.11 and 3.12.
+
+#### Running the verification
+
+```bash
+# Fast, config-only
+pytest tests/unit/test_install_contract.py -v
+
+# Slow, end-to-end (~20 s)
+make verify-install
+
+# Debug a failure
+KEEP_INSTALL=1 ./scripts/verify_install.sh
+# Leaves the venv, temp cwd, and wheel dir in place, prints their paths
+```
+
+`PYTHON_BIN=python3.12 ./scripts/verify_install.sh` selects a specific
+interpreter (used by the CI matrix).
+
+#### See also
+
+- [ADR-005](../adr/ADR-005-verify-installed-wheel-outside-source-tree.md) — decision record for this verification strategy.
+- `scripts/verify_install.sh` — the end-to-end verifier.
+- `tests/unit/test_install_contract.py` — the config-level complement.
+- §4.12 "Built Artifact Content Inspection" — the wheel-content
+  contract that this section's "does it install?" contract complements.
+- `docs/public-api.md` §"Guarantees" — the import-time behaviour this
+  section verifies from a clean environment.
+
 ---
 
 ## 5. Security & Secret Handling
@@ -656,6 +771,7 @@ Before tagging a release:
 - [ ] MyPy passes.
 - [ ] `python -m build` succeeds without warnings.
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
+- [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -674,3 +790,4 @@ Before tagging a release:
 | 0.1.2 | 2026-10-27 | Solo Dev | Added "Build Verification" and "PyPI Classifiers" sections (WBS 0.5.2). |
 | 0.1.3 | 2026-10-28 | Solo Dev | Added §4.11 "Dependency Groups and Verification" (WBS 1.1.3); documented the constraint-style reconciliation as a Phase 1 follow-up; added `docs/public-api.md` to the Documentation Standards table; added `make verify-deps` to the Release Checklist. |
 | 0.1.4 | 2026-10-28 | Solo Dev | Added §4.12 "Built Artifact Content Inspection" (WBS 1.1.4); marked §1.6 as superseded by §4.12; added `make verify-build` to the Release Checklist; added `packaging` to the Dependency Inventory (from WBS 1.1.3's `[dev]` addition). |
+| 0.1.5 | 2026-10-28 | Solo Dev | Added §4.13 "Clean-Install Verification" (WBS 1.1.5); extended §1.6 superseded note to point at §4.13; added `make verify-install` to the Release Checklist; documented the `py.typed` marker requirement (PEP 561) tied to the `Typing :: Typed` classifier. |
