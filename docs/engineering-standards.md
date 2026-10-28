@@ -900,7 +900,129 @@ make verify-build
 
 ---
 
-## 5. Security & Secret Handling
+## 5. Configuration
+
+### 5.1 Configuration schema conventions
+
+The ForgeQA configuration schema (`src/forgeqa/config/models.py`) is a
+Pydantic v2 hierarchy. This section documents the conventions
+contributors follow when adding or changing a config field.
+
+#### Rules
+
+1. **Every field is strictly typed.** Use the narrowest type that
+   accepts the valid values:
+   - `Literal[...]` for constrained string sets (e.g. `browser_name`,
+     `log_level`).
+   - `AnyHttpUrl` for URLs.
+   - `PositiveInt` for strictly-positive integers.
+   - `bool` for booleans. Pydantic v2 accepts a bounded set of string
+     forms for `bool` (`"true"/"false"`, `"yes"/"no"`, `"on"/"off"`,
+     `"1"/"0"`, case-insensitive); ambiguous strings like `"maybe"`
+     are rejected. Do not add a custom validator for this — it is
+     already the behaviour.
+   - `str` with `min_length=1` for required non-empty strings.
+
+   Do not use `str` or `int` without constraints when a constraint
+   exists. A `str` `browser_name` accepts `"safari"`; a `Literal`
+   fails at parse time and lists the valid values in the error.
+
+2. **Every field has a default.** `ForgeQAConfig()` must be valid with
+   no arguments. The default is the "when you don't configure
+   anything" behaviour, documented in `docs/configuration.md`. A
+   field with no sensible default belongs in a future sub-model with
+   a construction prerequisite, not in the root config.
+
+3. **`model_config` flags are set on every model.**
+   ```python
+   model_config = ConfigDict(
+       extra="forbid",  # reject unknown keys
+       frozen=True,  # immutable
+       str_strip_whitespace=True,  # strip whitespace in strings
+       validate_assignment=True,  # assignment also validates
+       validate_default=True,  # defaults validated at class def
+   )
+   ```
+   Applied to the root model *and* every sub-model, so a sub-model
+   constructed in isolation has the same guarantees as one
+   constructed through the root.
+
+4. **Sub-models compose; they do not inherit.**
+   `ForgeQAConfig` has five sub-model fields. A new concern (e.g.
+   `DatabaseConfig` in Phase 6) is a new `BaseModel` plus one new
+   field on the root, not a subclass. This keeps each sub-model
+   constructible and testable in isolation.
+
+5. **`docs/configuration.md` is updated in the same PR as any field
+   change.** A new field, a changed default, a changed type, or a
+   removed field requires a corresponding doc update. The doc is the
+   consumer-facing reference; the schema is the enforcement. Missing
+   the doc update produces a consumer-facing doc that lags the
+   schema. Code review catches most cases; the test suite catches
+   defaults (via `test_*_config_defaults`) and validation rules (via
+   the negative cases).
+
+6. **Cross-field validators require a concrete rule.** Do not add a
+   `@model_validator` speculatively. When a concrete rule exists
+   ("if A then B must be C"), add the validator and a test in the
+   same PR. See ADR-007 Decision #7.
+
+7. **Public names are re-exported from `forgeqa.config`, not
+   `forgeqa.config.models`.** Consumers import
+   `from forgeqa.config import ForgeQAConfig`. The `models` submodule
+   is an implementation detail; it may be split into `browser.py` /
+   `api.py` / etc. without a breaking change. `__all__` in
+   `forgeqa/config/__init__.py` lists the public names (per ADR-006's
+   `__all__` convention).
+
+8. **The schema does not load files.** Loading `forgeqa.toml`
+   (environment overlays, secret resolution, path expansion) is a
+   separate concern (WBS 1.2.2). The schema is the contract; the
+   loader is the mechanism. Tests for the schema use pure-Python
+   construction; tests for the loader are separate.
+
+#### Verification
+
+One test file, run in two contexts:
+
+- **Local (`make verify-config`, ~50 ms).** Fast enough for
+  pre-commit or a quick check before pushing.
+- **CI (`make ci`, which includes `verify-config`).** Runs on the
+  matrix (Ubuntu + macOS × Python 3.11 + 3.12).
+
+`tests/unit/config/test_models.py` covers:
+
+| Category | Tests |
+| :--- | :--- |
+| Defaults | `test_*_config_defaults` (one per sub-model) + `test_forgeqa_config_instantiable_with_defaults` |
+| Valid values | `test_valid_browser_names_accepted`, `test_valid_log_levels_accepted` (parametrised from `get_args(Literal)`) |
+| Invalid values | `test_invalid_browser_name_rejected`, `test_invalid_base_url_rejected`, `test_invalid_browser_timeout_rejected`, `test_invalid_api_timeout_rejected`, `test_invalid_log_level_rejected` |
+| Edge/boundary | `test_timeout_boundary_minimum`, `test_timeout_boundary_api_minimum`, `test_bool_from_common_string_forms_accepted`, `test_ambiguous_bool_string_rejected`, `test_extra_field_rejected`, `test_extra_field_rejected_at_root` |
+| Corner/composition | `test_nested_sub_model_validation`, `test_partial_override_uses_defaults_for_unspecified`, `test_full_config_round_trip_via_dict` |
+| Non-functional | `test_config_is_immutable`, `test_sub_model_is_immutable`, `test_json_schema_is_generated`, `test_str_strip_whitespace_applied`, `test_any_http_url_accepts_https_and_subdomains` |
+
+#### Running the verification
+
+```bash
+# Fast, config-only (~50 ms)
+make verify-config
+
+# Or directly
+pytest tests/unit/config/test_models.py -v
+```
+
+#### See also
+
+- [ADR-007](../adr/ADR-007-pydantic-config-hierarchy.md) — decision
+  record for the configuration schema.
+- `docs/configuration.md` — consumer-facing reference (every field,
+  type, default, and validation rule).
+- `src/forgeqa/config/models.py` — the schema source.
+- `tests/unit/config/test_models.py` — the executable contract.
+
+---
+
+## 6. Security & Secret Handling
 
 | Requirement | Implementation |
 | :--- | :--- |
@@ -912,7 +1034,7 @@ make verify-build
 
 ---
 
-## 6. Documentation Standards
+## 7. Documentation Standards
 
 | Document | Purpose |
 | :--- | :--- |
@@ -921,6 +1043,7 @@ make verify-build
 | `docs/architecture.md` | System context, container diagrams, dependency rules. |
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
 | `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
+| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` (every field, type, default, validation rule). |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -930,9 +1053,9 @@ make verify-build
 
 ---
 
-## 7. Versioning & Release Policy
+## 8. Versioning & Release Policy
 
-### 7.1 Semantic Versioning
+### 8.1 Semantic Versioning
 
 | Version | Meaning | Example |
 | :--- | :--- | :--- |
@@ -942,7 +1065,7 @@ make verify-build
 
 > **Pre-1.0 Policy**: While the project is in the `0.x.y` phase, breaking changes may occur in minor versions. Document them clearly in the CHANGELOG.
 
-### 7.2 Release Checklist
+### 8.2 Release Checklist
 
 Before tagging a release:
 
@@ -953,6 +1076,7 @@ Before tagging a release:
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
+- [ ] `make verify-config` passes (configuration schema; WBS 1.2.1).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -962,7 +1086,7 @@ Before tagging a release:
 
 ---
 
-## 8. Document History
+## 9. Document History
 
 | Version | Date | Author | Changes |
 | :--- | :--- | :--- | :--- |
@@ -973,3 +1097,4 @@ Before tagging a release:
 | 0.1.4 | 2026-10-28 | Solo Dev | Added §4.12 "Built Artifact Content Inspection" (WBS 1.1.4); marked §1.6 as superseded by §4.12; added `make verify-build` to the Release Checklist; added `packaging` to the Dependency Inventory (from WBS 1.1.3's `[dev]` addition). |
 | 0.1.5 | 2026-10-28 | Solo Dev | Added §4.13 "Clean-Install Verification" (WBS 1.1.5); extended §1.6 superseded note to point at §4.13; added `make verify-install` to the Release Checklist; documented the `py.typed` marker requirement (PEP 561) tied to the `Typing :: Typed` classifier. |
 | 0.1.6 | 2026-10-28 | Solo Dev | Added §4.14 "Public vs. Internal Module Conventions" (WBS 1.1.6); documented the `EXPECTED_ALL` test-authoritative pattern and the cross-module sharing with `test_install_contract.py`; added `make verify-public-api` to the Release Checklist; cross-referenced `docs/public-api.md` and ADR-006. |
+| 0.1.7 | 2026-10-28 | Solo Dev | Added §5 "Configuration" and §5.1 "Configuration schema conventions" (WBS 1.2.1); added `make verify-config` to the Release Checklist; added `docs/configuration.md` to the Documentation Standards table; noted Pydantic's bounded bool coercion in §5.1 rule 1. |

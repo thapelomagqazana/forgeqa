@@ -11,3 +11,4 @@
 | [004](ADR-004-verify-built-artifacts-contain-exactly-the-intended-files-using-isolated-inspection-in-ci.md) | Verify built artifacts contain exactly the intended files, using isolated inspection in CI | Accepted | 2026-10-28 |
 | [005](ADR-005-verify-installed-wheel-works-outside-the-source-checkout-using-an-isolated-venv-and-a-source-tree-free-cwd.md) | Verify installed wheel works outside the source checkout using an isolated venv and a source-tree-free cwd | Accepted | 2026-10-28 |
 | [006](ADR-006-formalise-the-public-api-surface-and-the-private-module-naming-convention.md) | Formalise the public API surface and the private-module naming convention | Accepted | 2026-10-28 |
+| [007](ADR-007-model-the-forgeqa-configuration-as-a-strictly-typed-pydantic-v2-hierarchy-with-explicit-defaults.md) | Model the ForgeQA configuration as a strictly-typed Pydantic v2 hierarchy with explicit defaults | Accepted | 2026-10-28 |
