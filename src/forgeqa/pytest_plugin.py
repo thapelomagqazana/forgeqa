@@ -3,42 +3,67 @@
 This module is the entry point Pytest loads when it discovers the
 ``forgeqa`` plugin via the ``pytest11`` entry point group. It is the
 **single place** where ForgeQA registers pytest-level concerns: markers,
-hook implementations (added in later WBS), and any pytest-level
-configuration that must be visible in *the consumer's* pytest session.
+fixture sub-plugins, hook implementations (added in later WBS), and any
+pytest-level configuration that must be visible in *the consumer's*
+pytest session.
 
-Scope of this module (WBS 1.3.1)
---------------------------------
+Scope of this module (WBS 1.3.1, extended by WBS 1.3.2)
+------------------------------------------------------
 * Register the ForgeQA markers (``ui``, ``api``, ``unit``,
   ``integration``) so that a consumer who writes ``@pytest.mark.ui``
   does not see ``PytestUnknownMarkWarning``.
+* Declare the sub-plugins ForgeQA registers
+  (:data:`pytest_plugins`). As of WBS 1.3.2, that is
+  ``forgeqa.fixtures.settings``, which provides the session-scoped
+  ``settings`` fixture. The ``pytest_plugins`` declaration is what
+  lets the fixture import ``forgeqa.config`` **lazily** — pytest
+  imports ``pytest_plugins`` modules only when it activates this
+  plugin, so the plugin module's own import stays cheap (ADR-013
+  §Decision #3).
 * Do **not** import Playwright, HTTPX, or any optional dependency.
+* Do **not** import ``forgeqa.*`` at module level. The fixtures'
+  heavier imports belong in their own modules; this module wires
+  them up via ``pytest_plugins`` and leaves the cost to pytest's
+  plugin-activation time.
 * Do **not** read any config file at import time.
 
-The registration lives here (rather than in ``pyproject.toml``'s
+The marker registration lives here (rather than in ``pyproject.toml``'s
 ``[tool.pytest.ini_options].markers``) because that section configures
 *ForgeQA's own test suite*, not the consumer's. A consumer who installs
 ``forgeqa`` from PyPI has no ``pyproject.toml`` from us to inherit —
 they get marker registration only via the plugin hook. See ADR-013.
 
+The fixture registration lives here (rather than in a project-level
+``conftest.py``) because pytest only auto-discovers a project's own
+``conftest.py``, not a third-party plugin's submodules. The plugin's
+``pytest_plugins`` tuple is the mechanism that makes a plugin's fixtures
+discoverable to consumers without any ``conftest.py``. See ADR-014.
+
 **Import cost is critical.** Pytest imports this module in **every**
 pytest invocation in **every** project where ``forgeqa`` is installed
 — including projects that do not use ForgeQA at all. That import must
 be cheap: no I/O, no heavy imports, no side effects. The expensive
-work (the ``pytest_configure`` hook) runs only when Pytest is actually
-about to run tests, not for ``pytest --version`` or ``pytest --help``.
+work runs only when Pytest is actually about to run tests, not for
+``pytest --version`` or ``pytest --help``:
+
+* ``pytest_configure`` runs after plugin load, before test collection.
+* ``pytest_plugins`` modules are imported by pytest when it **activates**
+  the plugin — after deciding to run tests, not on ``--version`` /
+  ``--help``.
 
 To keep the import cheap, this module imports only:
 * the stdlib,
 * ``pytest`` (already installed as a runtime dependency, so no
   additional cost),
 * nothing from ``forgeqa.*`` — the marker manifest is a plain tuple
-  of strings and does not need the config schema.
+  of strings, and the fixture sub-plugins are strings in a tuple that
+  pytest resolves lazily.
 
-A future WBS (1.3.x — the ``browser`` / ``api_client`` fixtures) will
-add imports of ``forgeqa.config`` and optional adapters *inside*
-hook implementations or fixtures, so the module-level import stays
-cheap. Do not hoist those imports to module level without measuring
-the cost first.
+A future WBS (1.3.3 / 1.3.4 — the ``browser`` / ``api_client`` fixtures)
+adds them as new modules under ``forgeqa/fixtures/`` and new entries in
+:data:`pytest_plugins`. Same pattern: no module-level ``forgeqa.*``
+import here, only the dotted-path string in the tuple. Do not hoist
+those imports to module level without measuring the cost first.
 
 Marker manifest
 ---------------
@@ -69,9 +94,13 @@ their own ``pyproject.toml`` or ``pytest.ini``. See ADR-013
 See also
 --------
 * ADR-013 — pytest11 registration and marker manifest design
-* ``docs/plugins.md`` — the pytest surface ForgeQA exposes
-* ``docs/engineering-standards.md`` §"Pytest markers" — the
-  contributor-facing conventions
+* ADR-014 — ``settings`` fixture design and the lazy sub-plugin
+  mechanism
+* ``docs/plugins.md`` — the pytest surface ForgeQA exposes (markers,
+  fixtures, verification commands)
+* ``docs/engineering-standards.md`` §3.3 "Pytest" (runtime dependency
+  and the two marker sets) and §3.4 "Pytest markers and plugin
+  registration" (contributor-facing rules)
 """
 
 from __future__ import annotations
@@ -81,6 +110,7 @@ import pytest
 __all__ = [
     "FORGEQA_MARKERS",
     "pytest_configure",
+    "pytest_plugins",
 ]
 
 
@@ -120,6 +150,44 @@ FORGEQA_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Sub-plugins this plugin registers.
+#:
+#: Pytest imports each module in this tuple when it **activates** this
+#: plugin — i.e. after deciding to run tests, not for ``pytest
+#: --version`` or ``pytest --help``. The import of
+#: ``forgeqa.fixtures.settings`` — and, transitively, of
+#: ``forgeqa.config`` — is therefore deferred until pytest is actually
+#: going to run tests, which is exactly the moment the cost is worth
+#: paying. This is the mechanism by which the module-level import of
+#: **this** file stays cheap (ADR-013 §Decision #3) while the fixtures
+#: still import ``forgeqa.config`` (ADR-014 §Decision #1).
+#:
+#: The string form (not a list) mirrors the ``pytest11`` entry point's
+#: immutability convention; a list would work but signals "mutable
+#: global" for no reason.
+#:
+#: **Adding a sub-plugin.** Append its dotted path here, and add the
+#: fixture module under ``src/forgeqa/fixtures/``. The dotted path
+#: must be importable — pytest raises ``PluginValidationError`` at
+#: plugin-load time if it is not, which fails the consumer's pytest
+#: run with a clear traceback naming this tuple.
+#:
+#: **Do not import the fixture module here.** ``from
+#: forgeqa.fixtures import settings`` at module level would defeat the
+#: whole mechanism: pytest would import this module on every
+#: invocation, and the module-level import would drag in
+#: ``forgeqa.config`` (pydantic, tomllib, schema) with it. The
+#: dotted-path string in the tuple is what defers that import to
+#: plugin-activation time.
+#:
+#: **Order.** Pytest imports them in tuple order. The current single
+#: entry has no order dependence; when ``browser`` and ``api_client``
+#: land (WBS 1.3.3 / 1.3.4), both depend on ``settings``, so
+#: ``settings`` must come first. Keep ``settings`` at index 0 as a
+#: convention.
+pytest_plugins: tuple[str, ...] = ("forgeqa.fixtures.settings",)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register ForgeQA's markers on the consumer's pytest session.
 
@@ -130,6 +198,13 @@ def pytest_configure(config: pytest.Config) -> None:
     time, and re-registering a marker is a no-op for validation
     purposes).
 
+    The function does **not** register fixtures — that is what
+    :data:`pytest_plugins` is for. It does **not** load config — that
+    is what the ``settings`` fixture is for (WBS 1.3.2). It does
+    **not** read the consumer's pytest configuration (``config.option``,
+    ``config.inicfg``, ``config.getini``) — the plugin must be safe
+    to load in any project.
+
     Parameters
     ----------
     config
@@ -139,7 +214,8 @@ def pytest_configure(config: pytest.Config) -> None:
         consumer configuration here. That is deliberate — the plugin
         must be safe to load in a consumer's project regardless of
         that project's pytest configuration. Reading config is a
-        Phase 1 concern (``forgeqa.toml`` loading via a fixture).
+        Phase 1 concern (``forgeqa.toml`` loading via the ``settings``
+        fixture, WBS 1.3.2).
 
     Notes
     -----
