@@ -54,6 +54,11 @@ classifiers = [
 #   - tests/unit/test_dependency_groups.py::
 #       test_core_dependencies_do_not_include_optional_deps
 #   - scripts/verify_deps.sh (scenario: core)
+#
+# NOTE: pytest is deliberately a runtime dependency, not an optional
+# extra. ForgeQA is a pytest plugin (see [project.entry-points.pytest11]
+# below); a pytest11 plugin that is not importable without pytest is not
+# a plugin. Keeping `pytest` here is the correct trade-off.
 dependencies = [
     "pytest>=9.2.0",
     "pydantic>=2.14.1",
@@ -120,6 +125,33 @@ all = [
     "pre-commit",
     "packaging",
 ]
+
+# =============================================================================
+# Pytest plugin registration
+# =============================================================================
+# Registering under the `pytest11` entry point group makes pytest
+# auto-discover this plugin when `forgeqa` is installed in the same
+# environment as the `pytest` executable. A consumer does not need to add
+# `-p forgeqa.pytest_plugin` to their pytest invocation; installing
+# `forgeqa` is enough.
+#
+# The value on the right is a dotted module path. It must be importable
+# without side effects; see `src/forgeqa/pytest_plugin.py`'s module
+# docstring for the import-cost contract.
+#
+# Enforced by:
+#   - tests/unit/test_plugin_registration.py::test_pyproject_declares_pytest11_entry_point
+#   - tests/integration/plugin/test_plugin_smoke.py (subprocess: --trace-config,
+#     --markers, and @pytest.mark.ui with -W error::pytest.PytestUnknownMarkWarning)
+#   - docs/adr/ADR-013-register-forgeqa-as-a-pytest11-plugin-with-a-central-marker-manifest.md
+#
+# IMPORTANT: pytest must remain a [project].dependencies entry (not an
+# optional extra). A pytest11 plugin that is not importable without
+# pytest is not a plugin. See the comment above `dependencies` at the top
+# of this file — it already covers playwright/httpx; this note extends
+# the invariant to pytest.
+[project.entry-points.pytest11]
+forgeqa = "forgeqa.pytest_plugin"
 
 # =============================================================================
 # Project URLs

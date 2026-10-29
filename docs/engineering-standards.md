@@ -201,7 +201,7 @@ mypy src
 | :--- | :--- | :--- |
 | `testpaths` | `["tests"]` | Standard test discovery location. |
 | `addopts` | `-ra --strict-markers` | Shows extra test summary and prevents marker typos. |
-| `markers` | `unit`, `integration`, `ui`, `api`, `smoke`, `slow` | Standardised marker taxonomy. |
+| `markers` | `unit`, `integration`, `ui`, `api`, `smoke`, `slow` | **ForgeQA's own** test suite's marker taxonomy. Consumer-facing markers are registered by the plugin; see §3.4. |
 | `filterwarnings` | `error` (except `DeprecationWarning`) | Treats warnings as errors to catch issues early. |
 
 **Commands:**
@@ -211,6 +211,223 @@ pytest -m unit                # Run only unit tests
 pytest -m "not slow"          # Exclude slow tests
 pytest --cov=src/forgeqa      # Run with coverage
 ```
+
+> **`pytest` is a runtime dependency, not an optional extra.** ForgeQA
+> registers itself as a `pytest11` plugin (WBS 1.3.1, §3.4), which means
+> the plugin module must be importable whenever the `pytest` executable
+> runs. Keeping `pytest` in `[project].dependencies` is what guarantees
+> that. Do **not** move it to an optional extra without an ADR — a
+> `pytest11` plugin that is not importable without `pytest` is not a
+> plugin. See `pyproject.toml`'s comment above `dependencies` for the
+> related invariant (playwright / httpx are optional; pytest is not).
+>
+> **`[tool.pytest.ini_options].markers` configures ForgeQA's own test
+> suite, not the consumer's.** A consumer who installs `forgeqa` from
+> PyPI does not inherit this section. The consumer-facing markers (`ui`,
+> `api`, `unit`, `integration`) are registered at plugin-load time via
+> `FORGEQA_MARKERS` in `src/forgeqa/pytest_plugin.py`. The two sets
+> overlap by intent, not by accident; see §3.4.
+
+### 3.4 Pytest markers and plugin registration
+
+ForgeQA is a **pytest plugin**. Installing `forgeqa` in the same
+environment as `pytest` registers it via the `pytest11` entry point;
+pytest auto-discovers it on the next run. This section documents the
+contributor-facing rules for the plugin module and the marker manifest.
+
+The consumer-facing side is `docs/plugins.md`. This section is the
+counterpart: it tells the contributor what they must do to keep the
+contract true.
+
+#### Rules
+
+1. **The plugin is registered via `[project.entry-points.pytest11]` in
+   `pyproject.toml`:**
+
+   ```toml
+   [project.entry-points.pytest11]
+   forgeqa = "forgeqa.pytest_plugin"
+   ```
+
+   The value is a dotted module path. It must be importable without
+   side effects; see Rule 3. The entry point name `forgeqa` is what
+   `pytest -p forgeqa` refers to. Renaming it is a user-facing change;
+   see ADR-013 §Reconsideration Trigger.
+
+2. **Two marker sets, distinct in purpose and source.**
+
+   | Set | Source | Scope | Names |
+   | :--- | :--- | :--- | :--- |
+   | **Consumer** | `FORGEQA_MARKERS` in `src/forgeqa/pytest_plugin.py` | The consumer's pytest session, via the plugin | `ui`, `api`, `unit`, `integration` |
+   | **Framework** | `[tool.pytest.ini_options].markers` in `pyproject.toml` | ForgeQA's own test suite | `unit`, `integration`, `ui`, `api`, `smoke`, `slow` |
+
+   A marker is in **one** set, not both. `smoke` and `slow` are
+   framework-internal (ForgeQA's own test-suite conventions); they are
+   not registered by the plugin. A consumer who wants them declares
+   them in their own `pyproject.toml`. See ADR-013 §Alternatives
+   Considered (the "register all six" alternative) for why.
+
+   When adding a marker, decide which set it belongs to **first**:
+
+   - **Consumer** (a name a consumer's test file might use):
+     follow Rule 4.
+   - **Framework** (a ForgeQA-own test-suite grouping): add to
+     `[tool.pytest.ini_options].markers` and update this section's
+     table.
+
+3. **The plugin module imports cheaply.** `pytest` imports every
+   `pytest11` plugin on **every** invocation in **every** project with
+   `forgeqa` installed — including projects that have no idea what
+   ForgeQA is. The module-level import must therefore be:
+
+   - **stdlib + `pytest` only**;
+   - **no `forgeqa.*`** (importing the config schema — pydantic,
+     `tomllib`, the JSON-schema lookup — costs tens of milliseconds on
+     every pytest invocation, everywhere);
+   - **no optional dependency** (`playwright`, `httpx`, or anything
+     else that lives in an extra). A fixture that needs them imports
+     them **inside the fixture body**.
+
+   Enforced by
+   `tests/unit/test_plugin_registration.py::test_plugin_module_does_not_import_optional_dependencies`
+   (AST-based: asserts no `forgeqa.*`, `playwright`, or `httpx`
+   top-level import) and
+   `test_plugin_module_import_is_cheap` (time-bounded, 100 ms; measured
+   at ~1 ms on a cold interpreter). If you add an import and the test
+   fails, **move it inside the function that needs it** — do not relax
+   the test.
+
+4. **Adding a consumer marker touches four files in one PR.** The tests
+   are designed to make a change that skips any of them a CI failure:
+
+   1. `src/forgeqa/pytest_plugin.py` — add `(name, description)` to
+      `FORGEQA_MARKERS`. The description appears in `pytest --markers`;
+      it should be one sentence, ending with a period.
+   2. `tests/unit/test_plugin_registration.py::test_markers_manifest_has_expected_names`
+      — update the expected set.
+   3. `tests/integration/plugin/test_plugin_smoke.py::test_each_forgeqa_marker_does_not_warn`
+      — update the parametrization.
+   4. `docs/plugins.md` §"Markers the plugin registers" — add a row.
+
+   Missing any of the four means the contract is documented but not
+   enforced (or enforced but not documented).
+
+5. **`pytest_configure` reads only `config.addinivalue_line`.** It does
+   not read `config.option`, `config.inicfg`, or `config.getini`. Marker
+   registration must be independent of the consumer's pytest
+   configuration. Enforced by
+   `test_pytest_configure_does_not_read_consumer_config` (a strict
+   stand-in that raises `AttributeError` on any attribute but
+   `addinivalue_line`).
+
+6. **`pytest_configure` fails loudly on a pytest-API incompatibility.**
+   Unlike the config-error log call in §5.4 (which is best-effort,
+   wrapped in `contextlib.suppress(Exception)`), the marker registration
+   is load-bearing: a missing marker *is* the bug. If a future pytest
+   version renames `addinivalue_line` or changes its signature, the
+   plugin-load failure must surface with a traceback naming ForgeQA — a
+   silent failure leaves the user with a `PytestUnknownMarkWarning` that
+   does not name the cause. Do not wrap the `addinivalue_line` call in
+   `try`/`except`.
+
+7. **The end-to-end proof is a subprocess test.** Unit tests prove the
+   module is importable and the hook works when called; only a
+   subprocess proves pytest **discovers** the entry point.
+   `tests/integration/plugin/test_plugin_smoke.py` invokes `pytest` in
+   a temp directory and asserts:
+
+   - `pytest --trace-config` names `forgeqa.pytest_plugin`;
+   - `@pytest.mark.ui` with `-W error::pytest.PytestUnknownMarkWarning`
+     is green (the acceptance criterion, literally);
+   - `pytest --markers` lists each consumer marker;
+   - a plain pytest session (no ForgeQA imports or markers) still
+     passes ("do no harm").
+
+   The `--trace-config` test writes a trivial test file first, because
+   `pytest --co` on an empty directory exits 5 ("no tests collected"),
+   which would otherwise mask a real plugin-load failure behind an
+   exit-code assertion. See ADR-013 §Lessons learnt.
+
+8. **Stale installed metadata is the most common "plugin not
+   discovered" cause.** Adding `[project.entry-points.pytest11]` to
+   `pyproject.toml` does not refresh the installed distribution's
+   metadata — editable install or not. After adding an entry point,
+   refresh with:
+
+   ```bash
+   pip install --force-reinstall --no-deps -e ".[dev]"
+   ```
+
+   Or with `uv`:
+
+   ```bash
+   uv pip install --reinstall --no-deps -e ".[dev]"
+   ```
+
+   `--force-reinstall` rebuilds the metadata; `--no-deps` skips the
+   dependency tree (the deps are already satisfied). The
+   `docs/plugins.md` §"When the plugin is not being discovered"
+   section walks a consumer through the same diagnosis; the test's
+   failure messages reference this too.
+
+#### Verification
+
+Two layers, both required:
+
+1. **Config-level (fast, in-process).**
+   `tests/unit/test_plugin_registration.py` asserts:
+   - the module is importable from `forgeqa.pytest_plugin`;
+   - the module imports cheaply (time-bounded, AST-checked);
+   - `FORGEQA_MARKERS` contains exactly the four consumer markers;
+   - `pytest_configure` registers every manifest marker with the
+     correct description, and nothing else;
+   - `pytest_configure` is idempotent;
+   - `pytest_configure`'s signature is `(config) -> None`;
+   - the entry point is declared in the installed distribution's
+     metadata (the same view pytest uses).
+
+   Runs in <200 ms as part of `make test`.
+
+2. **End-to-end (slow, subprocess).**
+   `tests/integration/plugin/test_plugin_smoke.py` invokes a real
+   `pytest` subprocess in a temp directory and asserts the four
+   acceptance properties listed in Rule 7. This is the only way to
+   prove discovery.
+
+   Runs in ~1 s as part of `make test` (integration marker). It does
+   **not** need the reference app; the plugin has no dependency on it.
+
+#### Running the verification
+
+```bash
+# Fast, config-only
+pytest tests/unit/test_plugin_registration.py -v
+
+# Subprocess ATDD
+pytest tests/integration/plugin/ -v
+
+# Just the ATDD half of the acceptance criterion, literally
+cd /tmp && mkdir smoke && cd smoke
+printf 'import pytest\n\n@pytest.mark.ui\ndef test_marked():\n    assert True\n' > test_marked.py
+python -m pytest -W error::pytest.PytestUnknownMarkWarning -q
+# expected: 1 passed
+```
+
+#### See also
+
+- [ADR-013](../adr/ADR-013-register-forgeqa-as-a-pytest11-plugin-with-a-central-marker-manifest.md)
+  — decision record for the plugin registration and marker manifest.
+- `docs/plugins.md` — consumer-facing reference (what the plugin
+  registers, verification commands, adding a marker, import-cheapness).
+- `src/forgeqa/pytest_plugin.py` — the plugin source
+  (`FORGEQA_MARKERS`, `pytest_configure`).
+- `tests/unit/test_plugin_registration.py` — the plugin's unit test
+  suite.
+- `tests/integration/plugin/test_plugin_smoke.py` — the subprocess
+  ATDD suite.
+- §3.3 "Pytest" — the test-runner conventions the plugin complements.
+- §4.1 "Dependency Groups" — why `pytest` is a runtime dependency, not
+  an optional extra.
 
 ---
 
@@ -229,6 +446,8 @@ ForgeQA separates dependencies into groups so that users only install what they 
 | **All** | All optional dependencies (UI + API + Dev). | `pip install forgeqa[all]` |
 
 > **Rule**: Core installation must **not** install Playwright or HTTPX. These are optional and installed only when the user requests the `ui` or `api` extra.
+
+> **Rule**: Core installation **must** install `pytest`. ForgeQA is a `pytest11` plugin (§3.4); a plugin that is not importable without `pytest` is not a plugin. `pytest` is not an "optional extra" — it is the substrate.
 
 ### 4.2 Tooling
 
@@ -329,7 +548,7 @@ Configuration file: `.github/dependabot.yml`.
 
 | Dependency | Type | Purpose | Version Constraint | Python Support |
 | :--- | :--- | :--- | :--- | :--- |
-| **pytest** | Core | Test discovery and execution. | `~=9.2.0` | 3.10+ |
+| **pytest** | Core | Test discovery and execution. Also loads ForgeQA as a `pytest11` plugin (§3.4). | `~=9.2.0` | 3.10+ |
 | **pydantic** | Core | Configuration and result validation. | `~=2.14.1` | 3.8+ |
 | **playwright** | Optional (UI) | Browser automation. | `>=1.64.1` | 3.8+ |
 | **httpx** | Optional (API) | HTTP client for API testing. | `>=0.27` | 3.8+ |
@@ -1507,6 +1726,7 @@ make verify-config
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
 | `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
 | `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` and `FORGEQA_*` env vars (every field, type, default, validation rule, error-message shape, precedence behaviour, and loader behaviour). |
+| `docs/plugins.md` | Consumer-facing reference for ForgeQA's pytest surface (entry point, registered markers, verification commands, adding a marker, import-cheapness). See §3.4 for the contributor-facing side. |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -1540,6 +1760,7 @@ Before tagging a release:
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
 - [ ] `make verify-config` passes (configuration schema, loader, precedence, and error formatting; WBS 1.2.1, 1.2.2, 1.2.3, 1.2.4).
+- [ ] `pytest tests/integration/plugin/ -v` passes (plugin registration; WBS 1.3.1).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -1564,3 +1785,4 @@ Before tagging a release:
 | 0.1.8 | 2026-10-28 | Solo Dev | Added §5.2 "Configuration loader conventions" (WBS 1.2.2); added a §5 preamble pointing at `docs/configuration.md` and the schema/loader split; added the loader to §5.1 rule 8's cross-reference; expanded the §8.2 Release Checklist entry to cover both schema and loader; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention loader behaviour. |
 | 0.1.9 | 2026-10-29 | Solo Dev | Added §5.3 "Configuration precedence conventions" (WBS 1.2.3); documented the per-layer validation rule and the `model_copy(update=...)` trap in §5.3 rule 2; expanded the §5 preamble to four concerns (schema, loader, precedence, doc); updated §5.2 rules 1, 3, 4 to cross-reference §5.3 and to reflect that the loader now covers env and CLI layers; updated §5.2 §"Verification" and §"See also" to include `test_precedence.py` and ADR-009; expanded the §8.2 Release Checklist entry to cover precedence; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention precedence behaviour. |
 | 0.2.0 | 2026-10-29 | Solo Dev | Added §5.4 "Configuration error formatting conventions" (WBS 1.2.4); documented the two-sided-bounds schema lookup and the duplicate-field-name fix in §5.4 rules 2 and 3; expanded the §5 preamble to five concerns (schema, loader, precedence, formatter, doc); added §5.1 rule 9 "Field validators produce human-readable error messages"; updated §5.1 rule 1 to use `Annotated[int, Field(...)]` instead of `PositiveInt` for bounded integers; updated §5.2 rules 1, 3 to reflect the formatter and `test_validation.py`; updated §5.2 §"Verification" and §"See also" to include `test_validation.py` and §5.4; updated §5.3 preamble, §"Verification", and §"See also" to include the formatter; expanded the §8.2 Release Checklist entry to cover error formatting; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention error-message shape. |
+| 0.2.1 | 2026-10-29 | Solo Dev | Added §3.4 "Pytest markers and plugin registration" (WBS 1.3.1); expanded §3.3 to note that `pytest` is a runtime dependency (not an optional extra) and to distinguish the framework-vs-consumer marker sets; updated §4.1 with a rule that core installation must install `pytest`; added the plugin's runtime role to §4.8's `pytest` inventory row; added `docs/plugins.md` to §7 Documentation Standards; added a `pytest tests/integration/plugin/` entry to §8.2 Release Checklist. |
