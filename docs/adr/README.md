@@ -16,3 +16,4 @@
 | [009](ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md) | Resolve configuration precedence as CLI args > environment variables > forgeqa.toml > defaults | Accepted | 2026-10-28 |
 | [010](ADR-010-validate-config-fields-with-pydantic-constraints-plus-a-small-human-readable-error-formatter.md) | Validate config fields with Pydantic constraints plus a small human-readable error formatter | Accepted | 2026-10-29 |
 | [011](ADR-011-make-safe-defaults-explicit-and-testable-against-the-reference-app.md) | Make safe defaults explicit and testable against the reference app | Accepted | 2026-10-29 |
+| [012](ADR-012-log-every-config-error-at-error-level-with-a-stable-structured-message.md) | Log every config error at ERROR level with a stable structured message | Accepted | 2026-10-29 |
