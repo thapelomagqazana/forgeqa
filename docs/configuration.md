@@ -11,12 +11,17 @@ The schema is enforced by `src/forgeqa/config/models.py` (see
 decision). The loader is `src/forgeqa/config/loader.py` (see
 [ADR-008](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) and
 [ADR-009](adr/ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md)
-for its design decisions). The model is a Pydantic v2 hierarchy —
-invalid values fail at parse time with a message that names the field
-and (for `Literal` fields) lists the valid values.
+for its design decisions). The error formatter that turns Pydantic's
+raw validation error into a single-line, user-facing message is
+`src/forgeqa/config/errors.py` (see
+[ADR-010](adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md)).
+The model is a Pydantic v2 hierarchy — invalid values fail at parse
+time with a message that names the field, the constraint, and the
+offending value; it does not include a Python traceback.
 
-**Status:** the schema (WBS 1.2.1), the loader (WBS 1.2.2), and the
-precedence hierarchy (WBS 1.2.3) are all implemented. This document
+**Status:** the schema (WBS 1.2.1), the loader (WBS 1.2.2), the
+precedence hierarchy (WBS 1.2.3), and field-level validation with
+formatted errors (WBS 1.2.4) are all implemented. This document
 describes the actual behaviour, not a target.
 
 ---
@@ -199,14 +204,19 @@ caller is code, and code typos should fail loudly.
 
 ### Errors
 
-Each layer reports errors with the layer's identifying information:
+Each layer reports errors with the layer's identifying information and
+a field-level, human-readable description:
 
-- **CLI override errors** name the offending key
-  (`"Invalid CLI override: ..."`).
-- **Environment variable errors** name the offending var
-  (`"Invalid value in environment variable(s) FORGEQA_BROWSER_BROWSER_NAME: ..."`).
-- **TOML errors** name the offending file
-  (`"Invalid configuration in /path/to/forgeqa.toml: ..."`).
+- **CLI override errors** name the offending key and the constraint,
+  e.g. `"Invalid CLI override: browser.timeout_ms must be between 100
+  and 60000, got 50"`.
+- **Environment variable errors** name the offending var and the
+  constraint, e.g. `"Invalid value in environment variable(s)
+  FORGEQA_BROWSER_TIMEOUT_MS: Invalid environment variable:
+  browser.timeout_ms must be between 100 and 60000, got 50"`.
+- **TOML errors** name the offending file and the constraint, e.g.
+  `"Invalid configuration in /path/to/forgeqa.toml:
+  browser.timeout_ms must be between 100 and 60000, got 50"`.
 
 An invalid value at a *lower* layer raises even if a *higher* layer
 overrides the field. This is intentional: an invalid env var is a bug
@@ -296,14 +306,15 @@ except ForgeQAConfigError as exc:
   line and column.
 - **Invalid TOML values.** The file parses as TOML but does not
   produce a valid `ForgeQAConfig` (e.g. `browser_name = "safari"`,
-  `timeout_ms = -1`, an unknown key). The message includes the file
-  path and the field-level error from Pydantic.
+  `timeout_ms = 50`, an unknown key). The message includes the file
+  path and a **human-readable** field-level description (see
+  ["Validation"](#validation) below).
 - **Invalid env var values.** A known `FORGEQA_*` var has a value that
   the target field rejects. The message names the environment
-  variable.
+  variable and the field-level description.
 - **Invalid CLI overrides.** A CLI override has an unknown section or
   field, or a value the target field rejects. The message names the
-  offending key.
+  offending key and the field-level description.
 - **Missing explicit path.** You passed `path=...` and the file does
   not exist.
 - **Unreadable file.** The file exists but cannot be read (e.g.
@@ -311,7 +322,8 @@ except ForgeQAConfigError as exc:
 
 The original exception (`TOMLDecodeError`, `ValidationError`,
 `OSError`, or `UnicodeDecodeError`) is preserved as `exc.__cause__`
-for debugging.
+for debugging. The user-facing message does **not** include Pydantic's
+raw traceback or internal type annotations.
 
 ### Determinism
 
@@ -444,7 +456,7 @@ defaults.
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `environment` | `str` (min length 1) | `"local"` | The environment label: `"local"`, `"ci"`, `"staging"`, `"production"`, or anything else. Used for environment overlays (Phase 1) and artifact tagging (Phase 3). |
-| `artifacts_dir` | `str` (min length 1) | `"artifacts"` | Directory where ForgeQA writes diagnostic artifacts. Relative to the working directory unless absolute. Created on first write; never deleted automatically. |
+| `artifacts_dir` | `str` (min length 1) | `"artifacts"` | Directory where ForgeQA writes diagnostic artifacts. Relative to the working directory unless absolute. Created on first write. The validator checks that the path *can* be created (nearest existing ancestor is writable) but does not create it. See ["Field-level constraints"](#field-level-constraints). |
 | `log_level` | `Literal["DEBUG", "INFO", "WARNING", "ERROR"]` | `"INFO"` | The framework's log level. Applied to the `forgeqa` logger, not the root logger. `"TRACE"` and `"CRITICAL"` are not accepted — see ["Why not `CRITICAL`?"](#why-not-critical) below. |
 
 ### `[browser]`
@@ -457,7 +469,7 @@ not import Playwright; the model is constructible even in a core install.
 | `browser_name` | `Literal["chromium", "firefox", "webkit"]` | `"chromium"` | The browser engine. Adding a new engine requires a corresponding ForgeQA adapter update; it is not a user-configurable choice. |
 | `headless` | `bool` | `true` | Whether to run headless. `false` opens a real browser window for debugging. |
 | `base_url` | `AnyHttpUrl` | `http://localhost:8000` | Base URL for relative navigation. Must be an `http` or `https` URL with a valid host. |
-| `timeout_ms` | `PositiveInt` | `10_000` | Default navigation and action timeout, in milliseconds. Must be strictly positive. |
+| `timeout_ms` | `int`, must be between 100 and 60000 (inclusive) | `10_000` | Default navigation and action timeout, in milliseconds. See ["Field-level constraints"](#field-level-constraints). |
 
 ### `[api]`
 
@@ -466,7 +478,7 @@ Only meaningful when `forgeqa[api]` is installed.
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `base_url` | `AnyHttpUrl` | `http://localhost:8000/api` | Base URL for API requests. Must be an `http` or `https` URL. |
-| `timeout_seconds` | `PositiveInt` | `10` | Default request timeout, in seconds. Must be strictly positive. |
+| `timeout_seconds` | `int`, must be between 1 and 300 (inclusive) | `10` | Default request timeout, in seconds. See ["Field-level constraints"](#field-level-constraints). |
 
 ### `[diagnostics]`
 
@@ -496,31 +508,70 @@ Controls *emission*. The counterpart is `[diagnostics]`, which controls
 
 ## Validation
 
-The schema is enforced by Pydantic v2. Invalid values fail at parse
-time with a message that names the field. Examples:
+ForgeQA validates configuration values as they are loaded. Invalid
+values fail with a **single-line, human-readable error** that names
+the field, the constraint, and the offending value — no Pydantic
+traceback.
+
+### Error message shape
+
+All validation errors have one of three forms, depending on which
+layer produced the value:
+
+```
+Invalid configuration in /path/to/forgeqa.toml: <section>.<field> <constraint>, got <value>
+Invalid value in environment variable(s) <VAR>: Invalid environment variable: <section>.<field> <constraint>, got <value>
+Invalid CLI override: <section>.<field> <constraint>, got <value>
+```
+
+The `<constraint>` is one of:
+
+- `must be between <lower> and <upper>` — for fields with two-sided
+  bounds (`timeout_ms`, `timeout_seconds`).
+- `must be at least <lower>` / `must be at most <upper>` — for
+  fields with a one-sided bound (none today; the fallback for a
+  future field that declares only one side).
+- `must be one of: <option1>, <option2>, ...` — for `Literal`
+  fields (`browser_name`, `log_level`).
+- `must be a creatable directory: <specific reason>` — for
+  `artifacts_dir`.
+- `unexpected field: <name>` — for unknown keys.
+- (fallback) Pydantic's own message, which is already human-readable.
+
+If more than one field is invalid, the message names the first and
+appends `" (and N more)"`. Fix the first error and re-run to see the
+next.
+
+### Examples
 
 ```
 $ # Invalid browser
-$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(browser_name='safari')"
-pydantic_core._pydantic_core.ValidationError: 1 validation error for BrowserConfig
-browser_name
-  Input should be 'chromium', 'firefox' or 'webkit' [type=literal_error, input_value='safari', input_type=str]
+$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(browser_name='safari')" 2>&1 | head -2
+ForgeQAConfigError: ... browser.browser_name must be one of: 'chromium', 'firefox' or 'webkit'; got 'safari'
 ```
 
 ```
-$ # Invalid timeout
-$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=-1)"
-pydantic_core._pydantic_core.ValidationError: 1 validation error for BrowserConfig
-timeout_ms
-  Input should be greater than 0 [type=greater_than, input_value=-1, input_type=int]
+$ # Invalid timeout (below range)
+$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=50)" 2>&1 | head -2
+ForgeQAConfigError: ... browser.timeout_ms must be between 100 and 60000, got 50
+```
+
+```
+$ # Invalid timeout (above range)
+$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=60_001)" 2>&1 | head -2
+ForgeQAConfigError: ... browser.timeout_ms must be between 100 and 60000, got 60001
+```
+
+```
+$ # Invalid artifacts_dir (points at a file)
+$ python -c "from forgeqa.config import GeneralConfig; GeneralConfig(artifacts_dir='/etc/hosts')" 2>&1 | head -2
+ForgeQAConfigError: ... general.artifacts_dir must be a creatable directory: artifacts_dir points at an existing file, not a directory: /etc/hosts
 ```
 
 ```
 $ # Unknown key (typo)
-$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timout_ms=10000)"
-pydantic_core._pydantic_core.ValidationError: 1 validation error for BrowserConfig
-timout_ms
-  Extra inputs are not permitted [type=extra_forbidden, input_value=10000, input_type=int]
+$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timout_ms=10000)" 2>&1 | head -2
+ForgeQAConfigError: ... browser.timout_ms unexpected field: timout_ms
 ```
 
 When these errors occur during `load_config` (i.e. from a real
@@ -530,27 +581,61 @@ above. An invalid env var or CLI override is likewise wrapped, with the
 env var name or CLI key in the message.
 
 The full set of validation rules is tested by
-`tests/unit/config/test_models.py` (see the "Negative cases" section
-there).
+`tests/unit/config/test_models.py` (acceptance: "is this value
+valid?") and `tests/unit/config/test_validation.py` (message shape:
+"what does the user see when it is not?").
+
+### No tracebacks
+
+The error message is a single line. It does **not** include:
+
+- `pydantic_core._pydantic_core.ValidationError:` — the raw
+  Pydantic exception name.
+- `[type=..., input_value=..., input_type=...]` — Pydantic's internal
+  type annotations.
+- A Python traceback.
+
+The underlying `pydantic.ValidationError` is preserved as
+`exc.__cause__` for debugging, so a tool that wants the structured
+form can still access it. The user-facing message is the actionable
+part.
 
 ### What "clear error" means in practice
 
 A clear error:
 
-1. **Names the field.** The `loc` in the error points at the offending
-   field, including the parent path if the field is nested
-   (`("browser", "browser_name")`, not just `("browser_name",)`).
-2. **Names the valid values** (for `Literal` fields). The message lists
-   `'chromium', 'firefox' or 'webkit'`; the user does not have to grep
-   the source to find them.
-3. **Names the constraint** (for constrained fields). `"Input should
-   be greater than 0"` is the constraint, not a generic "invalid
-   input".
-4. **Is actionable.** The user knows what to change after reading the
-   error, without opening a doc.
+1. **Names the field, with its section.** `browser.timeout_ms`, not
+   just `timeout_ms`. This matters when the same field name exists in
+   multiple sections.
+2. **Names the valid range or options.** `"between 100 and 60000"`,
+   `"one of: 'chromium', 'firefox' or 'webkit'"`. The user does not
+   have to grep the source to find the bound or the valid values.
+3. **Names the offending value.** `"got 50"`, `"got 'safari'"`. The
+   user can compare against the range without opening the file.
+4. **Is one line.** No multi-line traceback, no internal annotations.
+5. **Is actionable.** The user knows what to change after reading the
+   error.
 
 If an error does not meet these criteria, it is a bug — open an issue
 at <https://github.com/thapelomagqazana/forgeqa/issues>.
+
+### Field-level constraints
+
+The following fields have explicit constraints beyond their type:
+
+| Field | Constraint | Message on violation |
+| :--- | :--- | :--- |
+| `browser.browser_name` | One of `"chromium"`, `"firefox"`, `"webkit"`. | `must be one of: 'chromium', 'firefox' or 'webkit'` |
+| `browser.timeout_ms` | Integer between `100` and `60000` (inclusive). | `must be between 100 and 60000, got <value>` |
+| `api.timeout_seconds` | Integer between `1` and `300` (inclusive). | `must be between 1 and 300, got <value>` |
+| `general.artifacts_dir` | Creatable: if the path exists, it must be a directory; if not, the nearest existing ancestor must be a writable directory. The validator does **not** create the directory — it is created on first write. | `must be a creatable directory: <specific reason>` (e.g. `parent is not writable: /path`, `points at an existing file, not a directory: /path`) |
+| `general.log_level` | One of `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`. | `must be one of: 'DEBUG', 'INFO', 'WARNING' or 'ERROR'` |
+| `browser.base_url`, `api.base_url` | A valid `http` or `https` URL. | `Input should be a valid URL` (Pydantic's fallback) |
+| `general.environment`, `general.artifacts_dir` | Non-empty string (`min_length=1`). | `must be at least 1 characters` (Pydantic's one-sided fallback) |
+| `diagnostics.screenshots`, `diagnostics.traces`, `diagnostics.console_logs`, `reporting.junit_xml`, `reporting.json_report` | A boolean. Pydantic accepts the usual string forms (`"true"/"false"`, `"yes"/"no"`, `"on"/"off"`, `"1"/"0"`, case-insensitive); ambiguous strings like `"maybe"` are rejected. | Pydantic's `Input should be a valid boolean` |
+
+The full set of validation rules is tested by
+`tests/unit/config/test_models.py` and `tests/unit/config/test_validation.py`.
 
 ### Boolean coercion
 
@@ -767,9 +852,9 @@ public-api doc.
 
 ---
 
-## Schema, loader, and precedence are separate concerns
+## Schema, loader, precedence, and validation are separate concerns
 
-The configuration is split across three modules with distinct
+The configuration is split across four modules with distinct
 responsibilities:
 
 - **The schema** (`src/forgeqa/config/models.py`, ADR-007) defines
@@ -783,10 +868,15 @@ responsibilities:
   precedence logic in `loader.py`, ADR-009) reads `FORGEQA_*` env
   vars, applies CLI overrides, and validates each layer in isolation
   before merging. Tested by `tests/unit/config/test_precedence.py`.
+- **The error formatter** (`src/forgeqa/config/errors.py`, ADR-010)
+  turns Pydantic's raw `ValidationError` into the single-line,
+  human-readable message documented in ["Validation"](#validation).
+  Tested by `tests/unit/config/test_validation.py`.
 
 Splitting them means a schema change is testable without I/O, a loader
-change is testable without re-testing the schema, and the precedence
-change is testable without re-testing either. It also means a consumer
+change is testable without re-testing the schema, the precedence change
+is testable without re-testing either, and the message formatter is
+testable without going through the loader. It also means a consumer
 who wants to construct a config in Python (e.g. in a test fixture) can
 do so without touching a file or the environment:
 
@@ -817,7 +907,8 @@ power-user path.
 ## See also
 
 - [`docs/engineering-standards.md`](engineering-standards.md) §5.1 —
-  contributor-facing Pydantic conventions.
+  contributor-facing Pydantic conventions (including message
+  formatting).
 - [`docs/engineering-standards.md`](engineering-standards.md) §5.2 —
   contributor-facing loader and precedence conventions.
 - [`docs/adr/ADR-007`](adr/ADR-007-pydantic-config-hierarchy.md) —
@@ -826,14 +917,19 @@ power-user path.
   the loader design decision.
 - [`docs/adr/ADR-009`](adr/ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md) —
   the precedence design decision.
+- [`docs/adr/ADR-010`](adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md) —
+  the field-validation and error-formatter design decision.
 - [`docs/public-api.md`](public-api.md) — the package's public API
   contract.
 - `tests/unit/config/test_models.py` — the schema's executable
-  contract.
+  contract (acceptance: "is this value valid?").
 - `tests/unit/config/test_loader.py` — the loader's executable
   contract.
 - `tests/unit/config/test_precedence.py` — the precedence's
   executable contract.
+- `tests/unit/config/test_validation.py` — the message shape's
+  executable contract ("what does the user see when it is not?").
 - `src/forgeqa/config/models.py` — the schema source.
 - `src/forgeqa/config/loader.py` — the loader and precedence source.
 - `src/forgeqa/config/env.py` — the env-var mapping source.
+- `src/forgeqa/config/errors.py` — the error formatter source.

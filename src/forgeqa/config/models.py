@@ -3,14 +3,15 @@
 This module defines the **strictly typed configuration schema** that a
 consumer's ``forgeqa.toml`` will be loaded into (see
 ``docs/configuration.md`` for the consumer-facing reference and
-``ADR-008`` for the design decision).
+``ADR-007`` for the design decision).
 
 Design principles:
 
 1. **Strict typing.** Every field has a precise type. Constrained strings
-   use ``Literal[...]``; URLs use ``AnyHttpUrl``; positive integers use
-   ``PositiveInt``. A malformed value fails at parse time with a
-   message that names the field and lists the valid values.
+   use ``Literal[...]``; URLs use ``AnyHttpUrl``; bounded integers use
+   ``Annotated[int, Field(ge=..., le=...)]``. A malformed value fails at
+   parse time with a message that names the field and lists the valid
+   values.
 2. **Sensible defaults.** Every field has a default, so ``ForgeQAConfig()``
    is valid with no arguments. The defaults are the "when you don't
    configure anything" behaviour, and they are documented in
@@ -27,10 +28,21 @@ Design principles:
 6. **Assignment validation.** ``validate_assignment=True`` means that
    even a caller who subclasses the model and unfreezes it cannot assign
    an invalid value without going through validation.
+7. **Validation errors are human-readable.** Field-level constraints
+   (``Annotated[int, Field(ge=..., le=...)]``) and custom validators
+   (the ``artifacts_dir`` check) produce errors that the loader
+   formats via :func:`forgeqa.config.errors.format_validation_error`
+   into a single-line message naming the field, the constraint, and
+   the offending value. No Pydantic traceback reaches the user. See
+   ADR-010.
+8. **Validation has no side effects.** The ``artifacts_dir``
+   validator checks that the path *can* be created; it does **not**
+   create it. A config that is loaded but never used does not touch
+   the filesystem. See ADR-010 Decision #3.
 
 The models are intentionally **not** responsible for loading a file.
 Loading a ``forgeqa.toml`` (environment overlays, secret resolution,
-path expansion) is a separate concern and belongs in a follow-up module.
+path expansion) is a separate concern and belongs in the loader module.
 Separating the schema from the loader means the schema is testable
 without files on disk, and the loader is testable without re-testing the
 schema.
@@ -38,14 +50,16 @@ schema.
 
 from __future__ import annotations
 
-from typing import Literal
+import os
+from pathlib import Path
+from typing import Annotated, Literal
 
 from pydantic import (
     AnyHttpUrl,
     BaseModel,
     ConfigDict,
     Field,
-    PositiveInt,
+    field_validator,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,6 +93,10 @@ class GeneralConfig(BaseModel):
 
     All fields have defaults; see :mod:`forgeqa.config.models`'s module
     docstring for the "sensible defaults" principle.
+
+    The ``artifacts_dir`` field has a validator (see
+    :meth:`_artifacts_dir_must_be_creatable`) that proves the path can
+    be created. The validator does **not** create the directory.
     """
 
     model_config = ConfigDict(
@@ -107,8 +125,10 @@ class GeneralConfig(BaseModel):
             "Directory where ForgeQA writes diagnostic artifacts "
             "(screenshots, traces, JUnit XML, structured JSON). Relative "
             "to the working directory unless absolute. The directory is "
-            "created on first write and never deleted automatically; "
-            "retention is a Phase 3 concern."
+            "created on first write; the validator checks that it *can* "
+            "be created (nearest existing ancestor is writable) but does "
+            "not create it. Never deleted automatically; retention is a "
+            "Phase 3 concern."
         ),
     )
 
@@ -121,6 +141,82 @@ class GeneralConfig(BaseModel):
             "``docs/configuration.md`` for what each level enables."
         ),
     )
+
+    @field_validator("artifacts_dir", mode="after")
+    @classmethod
+    def _artifacts_dir_must_be_creatable(cls, value: str) -> str:
+        """Ensure ``artifacts_dir`` is creatable (or already a directory).
+
+        Parameters
+        ----------
+        value
+            The candidate ``artifacts_dir`` string. Already whitespace-
+            stripped by the model config.
+
+        Returns
+        -------
+        str
+            The value, unchanged. The validator is a check, not a
+            transformation.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` cannot be created as a directory. The message
+            names the specific reason (parent does not exist, path is
+            an existing file, parent is not writable) so the user can
+            fix it without guessing.
+
+        Notes
+        -----
+        The validator does **not** create the directory. It checks:
+
+        1. If the path already exists as a **directory**, accept it.
+        2. If the path already exists as a **file**, reject it (the
+           user almost certainly meant a different path; silently
+           accepting would fail later when ForgeQA tried to write
+           into the file).
+        3. If the path does not exist, walk up to the nearest existing
+           ancestor and check that it is a directory and writable. If
+           it is, ``mkdir(parents=True)`` would succeed, so the path
+           is acceptable.
+        4. If no existing ancestor is a directory, or the nearest one
+           is not writable, reject with a specific message.
+
+        The check is done on ``Path.resolve(strict=False)`` so that
+        symlinks and relative paths are resolved the same way
+        ``mkdir`` would resolve them.
+
+        This is a check, not an action: validation has no side
+        effects. See ADR-010 Decision #3.
+        """
+        # Resolve without requiring the path to exist; this also
+        # normalises relative paths against the current working
+        # directory, which is what the eventual `mkdir` will do.
+        resolved = Path(value).resolve(strict=False)
+
+        # 1. Existing directory: accept.
+        if resolved.is_dir():
+            return value
+
+        # 2. Existing file: reject with a specific message.
+        if resolved.exists():
+            raise ValueError(
+                f"artifacts_dir points at an existing file, not a directory: {resolved}"
+            )
+
+        # 3. Find the nearest existing ancestor and check it.
+        parent = resolved.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        if not parent.is_dir():
+            raise ValueError(
+                f"artifacts_dir cannot be created: parent is not a directory: {parent}"
+            )
+        if not os.access(parent, os.W_OK):
+            raise ValueError(f"artifacts_dir cannot be created: parent is not writable: {parent}")
+
+        return value
 
 
 class BrowserConfig(BaseModel):
@@ -135,6 +231,10 @@ class BrowserConfig(BaseModel):
     construct even in a core install (the ``browser`` fixture, when it
     lands in Phase 1, will assert that Playwright is available before
     trying to launch).
+
+    The ``timeout_ms`` field is bounded to ``[100, 60_000]``; values
+    outside that range are rejected with a message naming the bound.
+    See ADR-010 Decision #1.
     """
 
     model_config = ConfigDict(
@@ -175,13 +275,13 @@ class BrowserConfig(BaseModel):
         ),
     )
 
-    timeout_ms: PositiveInt = Field(
+    timeout_ms: Annotated[int, Field(ge=100, le=60_000)] = Field(
         default=10_000,
         description=(
             "Default navigation and action timeout, in milliseconds. "
-            "Must be strictly positive. Playwright's own default is "
-            "30 000 ms; ForgeQA uses 10 000 to fail faster in CI. "
-            "Individual actions may override this."
+            "Must be between 100 and 60000 (inclusive). Playwright's "
+            "own default is 30 000 ms; ForgeQA uses 10 000 to fail "
+            "faster in CI. Individual actions may override this."
         ),
     )
 
@@ -195,6 +295,11 @@ class APIConfig(BaseModel):
     This sub-model is only meaningful when ``forgeqa[api]`` is installed;
     the model itself does not import HTTPX, so it is safe to construct
     even in a core install.
+
+    The ``timeout_seconds`` field is bounded to ``[1, 300]``; values
+    outside that range are rejected with a message naming the bound.
+    The upper bound catches a typo like ``300_000`` (a user thinking
+    the field was in milliseconds). See ADR-010 Decision #1.
     """
 
     model_config = ConfigDict(
@@ -214,13 +319,13 @@ class APIConfig(BaseModel):
         ),
     )
 
-    timeout_seconds: PositiveInt = Field(
+    timeout_seconds: Annotated[int, Field(ge=1, le=300)] = Field(
         default=10,
         description=(
-            "Default request timeout, in seconds. Must be strictly "
-            "positive. HTTPX's own default is 5 s; ForgeQA uses 10 s "
-            "to accommodate slow test environments. Individual requests "
-            "may override this."
+            "Default request timeout, in seconds. Must be between 1 "
+            "and 300 (inclusive). HTTPX's own default is 5 s; ForgeQA "
+            "uses 10 s to accommodate slow test environments. "
+            "Individual requests may override this."
         ),
     )
 
@@ -238,6 +343,12 @@ class DiagnosticsConfig(BaseModel):
     Capture is opt-in per artifact type. All three are enabled by
     default because a test framework whose default is "capture nothing"
     provides no evidence when a test fails in CI.
+
+    The ``traces`` field is a strict ``bool``. Pydantic accepts the
+    usual string forms for a boolean (``"true"/"false"``,
+    ``"yes"/"no"``, ``"on"/"off"``, ``"1"/"0"``, case-insensitive);
+    ambiguous strings like ``"maybe"`` are rejected. See
+    ``docs/configuration.md`` §"Boolean coercion".
     """
 
     model_config = ConfigDict(
@@ -265,7 +376,9 @@ class DiagnosticsConfig(BaseModel):
             "UI test's failure. Traces are larger than screenshots "
             "(typically a few MB each) but contain the full browser "
             "interaction log, which is often necessary to diagnose a "
-            "flaky test. Requires ``forgeqa[ui]``."
+            "flaky test. Requires ``forgeqa[ui]``. Must be a boolean; "
+            "Pydantic accepts the usual string forms (see "
+            "``docs/configuration.md`` §'Boolean coercion')."
         ),
     )
 

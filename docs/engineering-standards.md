@@ -902,7 +902,7 @@ make verify-build
 
 ## 5. Configuration
 
-ForgeQA's configuration is split into four concerns:
+ForgeQA's configuration is split into five concerns:
 
 1. **The schema** (§5.1) — what a valid config looks like. Enforced by
    Pydantic v2 in `src/forgeqa/config/models.py`. No file I/O.
@@ -912,15 +912,19 @@ ForgeQA's configuration is split into four concerns:
    `FORGEQA_*` environment variables layer on top of `forgeqa.toml`
    and defaults. `src/forgeqa/config/env.py` and the precedence logic
    in `loader.py`.
-4. **The consumer doc** (`docs/configuration.md`) — the reference for
-   every field, type, default, validation rule, and precedence
-   behaviour.
+4. **The error formatter** (§5.4) — how Pydantic's raw
+   `ValidationError` becomes the single-line, human-readable message a
+   user sees. `src/forgeqa/config/errors.py`.
+5. **The consumer doc** (`docs/configuration.md`) — the reference for
+   every field, type, default, validation rule, precedence behaviour,
+   and error-message shape.
 
-The four are separate so each is testable independently: the schema
+The five are separate so each is testable independently: the schema
 without files, the loader without re-testing the schema, the
-precedence without re-testing either, and the doc without any of them.
-See §5.1, §5.2, and §5.3 for the contributor-facing rules and
-`docs/configuration.md` for the consumer-facing reference.
+precedence without re-testing either, the formatter without the loader,
+and the doc without any of them. See §5.1–§5.4 for the
+contributor-facing rules and `docs/configuration.md` for the
+consumer-facing reference.
 
 ### 5.1 Configuration schema conventions
 
@@ -935,7 +939,12 @@ contributors follow when adding or changing a config field.
    - `Literal[...]` for constrained string sets (e.g. `browser_name`,
      `log_level`).
    - `AnyHttpUrl` for URLs.
-   - `PositiveInt` for strictly-positive integers.
+   - `Annotated[int, Field(ge=..., le=...)]` for bounded integers
+     (e.g. `timeout_ms` is `[100, 60_000]`, `timeout_seconds` is
+     `[1, 300]`). A two-sided bound, expressed as `Annotated`, lets
+     Pydantic's structured error carry the violated bound; the
+     formatter (§5.4) renders the *declared* bounds (both sides) by
+     consulting the schema.
    - `bool` for booleans. Pydantic v2 accepts a bounded set of string
      forms for `bool` (`"true"/"false"`, `"yes"/"no"`, `"on"/"off"`,
      `"1"/"0"`, case-insensitive); ambiguous strings like `"maybe"`
@@ -945,7 +954,9 @@ contributors follow when adding or changing a config field.
 
    Do not use `str` or `int` without constraints when a constraint
    exists. A `str` `browser_name` accepts `"safari"`; a `Literal`
-   fails at parse time and lists the valid values in the error.
+   fails at parse time and lists the valid values in the error. A
+   plain `int` `timeout_ms` accepts `0`; the `Annotated` form rejects
+   it with the actual bounds.
 
 2. **Every field has a default.** `ForgeQAConfig()` must be valid with
    no arguments. The default is the "when you don't configure
@@ -995,12 +1006,28 @@ contributors follow when adding or changing a config field.
    `forgeqa/config/__init__.py` lists the public names (per ADR-006's
    `__all__` convention).
 
-8. **The schema does not load files.** Loading `forgeqa.toml`
-   (environment overlays, secret resolution, path expansion) is a
-   separate concern (§5.2 and §5.3, WBS 1.2.2 and 1.2.3). The schema
-   is the contract; the loader is the mechanism. Tests for the schema
-   use pure-Python construction; tests for the loader and precedence
-   are separate.
+8. **The schema does not load files or format errors.** Loading
+   `forgeqa.toml` is §5.2; the precedence layers are §5.3; the error
+   formatter is §5.4. The schema's job is to describe what a valid
+   config looks like; a change to how the config is *loaded*,
+   *overridden*, or how errors are *rendered* is not a schema change.
+
+9. **Field validators produce human-readable error messages.** When
+   adding a `@field_validator` (e.g. the `artifacts_dir` creatability
+   check), the raised error message is what the user sees after
+   `format_validation_error` (§5.4) processes it. The message must:
+   - Name the field (the formatter prepends `section.field` for
+     length-2 locs, so the validator's message can be just the
+     constraint: `"must be a creatable directory: ..."`).
+   - Name the constraint and the offending value.
+   - Be a single line, no newlines.
+
+   Prefer Pydantic's native constraints (`Annotated[int, Field(ge=...,
+   le=...)]`, `Literal[...]`, `AnyHttpUrl`) when the constraint is
+   expressible as a type. Use a `@field_validator` only when the
+   constraint requires I/O (e.g. the filesystem check for
+   `artifacts_dir`) or cross-field logic. See ADR-010 Decision #1
+   and #2.
 
 #### Verification
 
@@ -1018,8 +1045,8 @@ One test file, run in two contexts:
 | Defaults | `test_*_config_defaults` (one per sub-model) + `test_forgeqa_config_instantiable_with_defaults` |
 | Valid values | `test_valid_browser_names_accepted`, `test_valid_log_levels_accepted` (parametrised from `get_args(Literal)`) |
 | Invalid values | `test_invalid_browser_name_rejected`, `test_invalid_base_url_rejected`, `test_invalid_browser_timeout_rejected`, `test_invalid_api_timeout_rejected`, `test_invalid_log_level_rejected` |
-| Edge/boundary | `test_timeout_boundary_minimum`, `test_timeout_boundary_api_minimum`, `test_bool_from_common_string_forms_accepted`, `test_ambiguous_bool_string_rejected`, `test_extra_field_rejected`, `test_extra_field_rejected_at_root` |
-| Corner/composition | `test_nested_sub_model_validation`, `test_partial_override_uses_defaults_for_unspecified`, `test_full_config_round_trip_via_dict` |
+| Edge/boundary | `test_browser_timeout_boundary_values_accepted`, `test_api_timeout_boundary_values_accepted`, `test_bool_from_common_string_forms_accepted`, `test_ambiguous_bool_string_rejected`, `test_extra_field_rejected`, `test_extra_field_rejected_at_root` |
+| Corner/composition | `test_nested_sub_model_validation`, `test_nested_timeout_validation`, `test_partial_override_uses_defaults_for_unspecified`, `test_full_config_round_trip_via_dict` |
 | Non-functional | `test_config_is_immutable`, `test_sub_model_is_immutable`, `test_json_schema_is_generated`, `test_str_strip_whitespace_applied`, `test_any_http_url_accepts_https_and_subdomains` |
 
 #### Running the verification
@@ -1036,8 +1063,11 @@ pytest tests/unit/config/test_models.py -v
 
 - [ADR-007](../adr/ADR-007-pydantic-config-hierarchy.md) — decision
   record for the configuration schema.
+- [ADR-010](../adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md) —
+  decision record for the field-level constraints and the error
+  formatter.
 - `docs/configuration.md` — consumer-facing reference (every field,
-  type, default, and validation rule).
+  type, default, validation rule, and error-message shape).
 - `src/forgeqa/config/models.py` — the schema source.
 - `tests/unit/config/test_models.py` — the executable contract.
 
@@ -1071,7 +1101,9 @@ the schema.
    explicit paths, and (per §5.3) invalid env vars and CLI overrides.
    The original exception is preserved as `__cause__` for debugging.
    The message includes the file path (or env var name, or CLI key)
-   identifying the layer.
+   identifying the layer, and a **human-readable** description of the
+   field-level constraint via `format_validation_error` (§5.4) — not
+   Pydantic's raw traceback.
 
 4. **No caching.** Each call reads the file (and, per §5.3, the
    environment) fresh. A developer who edits `forgeqa.toml` and calls
@@ -1112,15 +1144,16 @@ covers:
 
 `make verify-config` runs the whole `tests/unit/config/` directory,
 which includes `test_models.py` (schema), `test_loader.py` (loader),
-and `test_precedence.py` (precedence, §5.3). There is no separate
-`make verify-loader` or `make verify-precedence` — the loader and the
-precedence hierarchy are parts of the configuration contract, and the
-three test files together are the contract.
+`test_precedence.py` (precedence, §5.3), and `test_validation.py`
+(message shape, §5.4). There is no separate `make verify-loader` or
+`make verify-precedence` — the loader and the precedence hierarchy
+are parts of the configuration contract, and the four test files
+together are the contract.
 
 #### Running the verification
 
 ```bash
-# Fast, config-only (schema + loader + precedence, ~150 ms)
+# Fast, config-only (schema + loader + precedence + validation, ~200 ms)
 make verify-config
 
 # Or directly
@@ -1139,6 +1172,8 @@ pytest tests/unit/config/ -v
 - §5.1 "Configuration schema conventions" — the schema counterpart.
 - §5.3 "Configuration precedence conventions" — the precedence
   counterpart.
+- §5.4 "Configuration error formatting conventions" — the error
+  formatter counterpart.
 
 ### 5.3 Configuration precedence conventions
 
@@ -1147,18 +1182,21 @@ The precedence hierarchy (WBS 1.2.3, ADR-009) layers CLI overrides,
 single `ForgeQAConfig`. This section documents the contributor-facing
 rules for extending or changing it.
 
-The precedence layer is separate from both the schema (§5.1) and the
-loader (§5.2):
+The precedence layer is separate from the schema (§5.1), the loader
+(§5.2), and the error formatter (§5.4):
 
 - **The schema** defines what a valid config looks like.
 - **The loader** reads `forgeqa.toml` into a config.
 - **The precedence layer** reads `FORGEQA_*` env vars, applies CLI
   overrides, validates each layer, and merges the layers.
+- **The error formatter** turns Pydantic's raw `ValidationError` into
+  the user-facing message.
 
 The split means each is testable in isolation: the schema without I/O,
-the loader without env/CLI, the precedence without re-testing either.
-The three test files (`test_models.py`, `test_loader.py`,
-`test_precedence.py`) together are the configuration contract.
+the loader without env/CLI, the precedence without re-testing either,
+the formatter without going through the loader. The four test files
+(`test_models.py`, `test_loader.py`, `test_precedence.py`,
+`test_validation.py`) together are the configuration contract.
 
 #### Rules
 
@@ -1260,7 +1298,7 @@ covers:
 #### Running the verification
 
 ```bash
-# Fast, config-only (schema + loader + precedence, ~150 ms)
+# Fast, config-only (schema + loader + precedence + validation, ~200 ms)
 make verify-config
 
 # Or directly
@@ -1282,6 +1320,168 @@ pytest tests/unit/config/test_precedence.py -v
 - `tests/unit/config/test_precedence.py` — the executable contract.
 - §5.1 "Configuration schema conventions" — the schema counterpart.
 - §5.2 "Configuration loader conventions" — the loader counterpart.
+- §5.4 "Configuration error formatting conventions" — the error
+  formatter counterpart.
+
+### 5.4 Configuration error formatting conventions
+
+The error formatter (WBS 1.2.4, ADR-010) turns Pydantic's raw
+`ValidationError` into the single-line, human-readable message a user
+sees. This section documents the contributor-facing rules for
+extending or changing it.
+
+The formatter is separate from the schema (§5.1), the loader (§5.2),
+and the precedence layer (§5.3): it consumes a `ValidationError` (from
+any of those) and produces a string. It is a pure function — no I/O, no
+persistent state — so it is testable in isolation.
+
+#### Rules
+
+1. **The user-facing message is a contract.** The format is:
+
+   ```
+   Invalid configuration in <path>: <section>.<field> <constraint>, got <value>[ (and N more)]
+   Invalid environment variable: <section>.<field> <constraint>, got <value>[ (and N more)]
+   Invalid CLI override: <section>.<field> <constraint>, got <value>[ (and N more)]
+   ```
+
+   The `<constraint>` is one of:
+   - `must be between <lower> and <upper>` — for two-sided bounds.
+   - `must be at least <lower>` / `must be at most <upper>` — for
+     one-sided bounds (the fallback when the field declares only one
+     side).
+   - `must be one of: <option1>, <option2>, ...` — for `Literal`
+     fields.
+   - `must be a creatable directory: <specific reason>` — for
+     `artifacts_dir` (the custom validator).
+   - `unexpected field: <name>` — for unknown keys.
+   - (fallback) Pydantic's `error["msg"]`.
+
+   The message is **single-line**. It does **not** include
+   `pydantic_core._pydantic_core.ValidationError:`,
+   `[type=..., input_value=..., input_type=...]`, or any traceback.
+
+   Changing the format is a semver-minor event: `docs/configuration.md`
+   §"Validation" documents it, `docs/public-api.md` mentions it in the
+   `forgeqa.config` guarantees, and `test_validation.py` pins it. A
+   future change must update all three in the same PR.
+
+2. **Two-sided bounds require a schema lookup.** Pydantic v2 emits
+   **one error per violated bound**, and each error's `ctx` carries
+   only that bound. A single error from
+   `Annotated[int, Field(ge=100, le=60_000)]` is either
+   `{"type": "greater_than_equal", "ctx": {"ge": 100}}` or
+   `{"type": "less_than_equal", "ctx": {"le": 60_000}}` — never both.
+   The `_declared_bounds_for(loc)` helper in
+   `src/forgeqa/config/errors.py` looks up the *other* bound from
+   `ForgeQAConfig.model_json_schema()`; the formatter uses both to
+   render `"must be between X and Y"`.
+
+   **Do not trust `error["ctx"]` to carry both bounds.** This was the
+   first implementation attempted; the test suite caught it with 10
+   "between X and Y" assertion failures. See ADR-010's Alternatives
+   table.
+
+3. **Two `loc` shapes.** A caller who constructs
+   `ForgeQAConfig(browser={"timeout_ms": 50})` gets
+   `loc = ("browser", "timeout_ms")` (length 2, section + field). A
+   caller who constructs `BrowserConfig(timeout_ms=50)` directly gets
+   `loc = ("timeout_ms",)` (length 1, field only). The formatter
+   handles both:
+   - **Length 2:** `_declared_bounds_for` looks up the section's
+     sub-schema, then the field. The message prefix is
+     `"browser.timeout_ms"`.
+   - **Length 1:** `_declared_bounds_for` scans every sub-model for
+     the field name; the first match wins. The message has no section
+     prefix (there is no section), just `"timeout_ms"`.
+
+   **Do not unconditionally prepend `_format_loc(loc)`.** `_format_error`
+   already names the field; prepending for length-1 locs produces
+   `"timeout_ms timeout_ms must be ..."` — a real bug in an early
+   version of the formatter. The prefix is only prepended when
+   `len(loc) >= 2`.
+
+4. **`format_validation_error` is the single formatter.** Do not
+   `str(exc)` a `ValidationError` in a user-facing path (the loader's
+   four `except ValidationError` blocks, `_validate_layer`'s three
+   branches, any future CLI adapter). The formatter is the only
+   function that produces the user-facing message; a direct `str(exc)`
+   produces Pydantic's raw error, which includes the internal type
+   annotations and a `pydantic_core._pydantic_core.ValidationError:`
+   line.
+
+5. **The `assert_clean_message` helper pins the "no traceback"
+   property.** `tests/unit/config/__init__.py` exports
+   `assert_clean_message(message)` which asserts no
+   `[type=...]` / `input_value=` / `input_type=` / `pydantic_core`
+   substrings, no `Traceback` substring, and no newlines. Used by
+   `test_models.py`, `test_loader.py`, `test_precedence.py`, and
+   `test_validation.py`. Adding a new error path? Call it.
+
+6. **The formatter is tested in two files, for different
+   contracts.**
+   - `test_validation.py` covers **message shape**: "what does the
+     user see when it is not?" (the two-sided bounds, the literal
+     options, the `artifacts_dir` specific reasons, the absence of
+     tracebacks, the layer prefixes).
+   - `test_models.py` covers **acceptance**: "is this value valid?"
+     (the bounds themselves, the `Literal` sets, the boolean
+     coercion). A change to a constraint's value updates
+     `test_models.py`; a change to the constraint's *message* updates
+     `test_validation.py`. Most constraint changes touch both.
+
+7. **`format_validation_error` is public.** It is exported from
+   `forgeqa.config` (listed in `__all__`, documented in
+   `docs/public-api.md` §`forgeqa.config`). Consumers who construct
+   configs directly (e.g. in a test fixture) can format the resulting
+   `ValidationError` the same way `load_config` does. Do not make it
+   private without an ADR.
+
+#### Verification
+
+`tests/unit/config/test_validation.py` is the executable contract. It
+covers:
+
+| Category | Tests |
+| :--- | :--- |
+| Positive | `test_valid_timeout_ms_accepted`, `test_valid_timeout_seconds_accepted`, `test_artifacts_dir_accepts_default`, `test_artifacts_dir_accepts_existing_directory`, `test_artifacts_dir_accepts_nonexistent_under_writable_parent` |
+| Negative | `test_invalid_timeout_ms_rejected_with_range`, `test_invalid_timeout_seconds_rejected`, `test_invalid_browser_name_lists_valid_options`, `test_artifacts_dir_rejects_existing_file`, `test_artifacts_dir_rejects_unwritable_parent` |
+| Edge/boundary | `test_invalid_timeout_ms_rejected_with_range[99/50/0/-1/60001/100000]` (six cases covering both bounds) |
+| Corner | `test_format_validation_error_with_multiple_errors` (the "(and N more)" suffix) |
+| Boundary | `test_loader_wraps_timeout_error_without_traceback`, `test_env_var_error_has_no_traceback`, `test_cli_override_error_has_no_traceback` (the three layers end-to-end) |
+| Non-functional | `test_format_validation_error_toml_layer`, `test_format_validation_error_env_layer`, `test_format_validation_error_cli_layer` (the prefix shapes) |
+
+#### Running the verification
+
+```bash
+# Fast, config-only (~50 ms)
+pytest tests/unit/config/test_validation.py -v
+
+# Or, all config tests together
+make verify-config
+```
+
+#### See also
+
+- [ADR-010](../adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md) —
+  decision record for the field-level constraints and the error
+  formatter.
+- `docs/configuration.md` §"Validation" — consumer-facing reference
+  (message shapes, examples, "no tracebacks", field-level
+  constraints table).
+- `src/forgeqa/config/errors.py` — the formatter source
+  (`format_validation_error`, `_declared_bounds_for`, `_format_error`).
+- `src/forgeqa/config/models.py` — the constraints
+  (`Annotated[int, Field(ge=..., le=...)]`) and the `artifacts_dir`
+  validator.
+- `tests/unit/config/test_validation.py` — the executable contract
+  for message shape.
+- `tests/unit/config/test_models.py` — the executable contract for
+  acceptance.
+- §5.1 "Configuration schema conventions" — the schema counterpart.
+- §5.2 "Configuration loader conventions" — the loader counterpart.
+- §5.3 "Configuration precedence conventions" — the precedence
+  counterpart.
 
 ---
 
@@ -1306,7 +1506,7 @@ pytest tests/unit/config/test_precedence.py -v
 | `docs/architecture.md` | System context, container diagrams, dependency rules. |
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
 | `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
-| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` and `FORGEQA_*` env vars (every field, type, default, validation rule, precedence behaviour, and loader behaviour). |
+| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` and `FORGEQA_*` env vars (every field, type, default, validation rule, error-message shape, precedence behaviour, and loader behaviour). |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -1339,7 +1539,7 @@ Before tagging a release:
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
-- [ ] `make verify-config` passes (configuration schema, loader, and precedence; WBS 1.2.1, 1.2.2, 1.2.3).
+- [ ] `make verify-config` passes (configuration schema, loader, precedence, and error formatting; WBS 1.2.1, 1.2.2, 1.2.3, 1.2.4).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -1363,3 +1563,4 @@ Before tagging a release:
 | 0.1.7 | 2026-10-28 | Solo Dev | Added §5 "Configuration" and §5.1 "Configuration schema conventions" (WBS 1.2.1); added `make verify-config` to the Release Checklist; added `docs/configuration.md` to the Documentation Standards table; noted Pydantic's bounded bool coercion in §5.1 rule 1. |
 | 0.1.8 | 2026-10-28 | Solo Dev | Added §5.2 "Configuration loader conventions" (WBS 1.2.2); added a §5 preamble pointing at `docs/configuration.md` and the schema/loader split; added the loader to §5.1 rule 8's cross-reference; expanded the §8.2 Release Checklist entry to cover both schema and loader; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention loader behaviour. |
 | 0.1.9 | 2026-10-29 | Solo Dev | Added §5.3 "Configuration precedence conventions" (WBS 1.2.3); documented the per-layer validation rule and the `model_copy(update=...)` trap in §5.3 rule 2; expanded the §5 preamble to four concerns (schema, loader, precedence, doc); updated §5.2 rules 1, 3, 4 to cross-reference §5.3 and to reflect that the loader now covers env and CLI layers; updated §5.2 §"Verification" and §"See also" to include `test_precedence.py` and ADR-009; expanded the §8.2 Release Checklist entry to cover precedence; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention precedence behaviour. |
+| 0.2.0 | 2026-10-29 | Solo Dev | Added §5.4 "Configuration error formatting conventions" (WBS 1.2.4); documented the two-sided-bounds schema lookup and the duplicate-field-name fix in §5.4 rules 2 and 3; expanded the §5 preamble to five concerns (schema, loader, precedence, formatter, doc); added §5.1 rule 9 "Field validators produce human-readable error messages"; updated §5.1 rule 1 to use `Annotated[int, Field(...)]` instead of `PositiveInt` for bounded integers; updated §5.2 rules 1, 3 to reflect the formatter and `test_validation.py`; updated §5.2 §"Verification" and §"See also" to include `test_validation.py` and §5.4; updated §5.3 preamble, §"Verification", and §"See also" to include the formatter; expanded the §8.2 Release Checklist entry to cover error formatting; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention error-message shape. |

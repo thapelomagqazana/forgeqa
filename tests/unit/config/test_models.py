@@ -1,12 +1,14 @@
 """Unit tests for the ForgeQA configuration schema.
 
-These tests cover WBS 1.2.1:
+These tests cover WBS 1.2.1 (schema) and WBS 1.2.4 (field-level
+validation):
 
 * :class:`ForgeQAConfig` is importable and instantiable with defaults.
 * ``browser_name`` rejects invalid values (e.g. ``"safari"``) with a
   clear error.
 * ``base_url`` rejects invalid URLs.
-* ``timeout_ms`` rejects negative values.
+* ``timeout_ms`` rejects values outside ``[100, 60000]``.
+* ``timeout_seconds`` rejects values outside ``[1, 300]``.
 * All sub-models have documented defaults.
 
 The tests also cover edge cases (boundary values), corner cases
@@ -16,7 +18,9 @@ WBS's "strictly typed and fully composable" KPI implies.
 
 The tests are **schema tests**, not loader tests. Loading a
 ``forgeqa.toml`` file into ``ForgeQAConfig`` is a separate concern
-(Phase 1); this file only tests the models.
+(covered by ``test_loader.py``); the human-readable error message
+shape is covered by ``test_validation.py``. This file covers
+acceptance: "is this value accepted, and is that value rejected?"
 
 Run only these tests:
 
@@ -210,28 +214,53 @@ def test_invalid_base_url_rejected(invalid_url: str) -> None:
         APIConfig(base_url=invalid_url)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("invalid_timeout", [0, -1, -10_000])
+@pytest.mark.parametrize(
+    "invalid_timeout",
+    [
+        0,  # zero
+        -1,  # negative
+        -10_000,  # well negative
+        99,  # boundary-1 (below the ge=100 lower bound)
+        60_001,  # boundary+1 (above the le=60000 upper bound)
+        100_000,  # well above
+    ],
+)
 def test_invalid_browser_timeout_rejected(invalid_timeout: int) -> None:
-    """Given a non-positive timeout, when constructing ``BrowserConfig``, then it raises ``ValidationError``.
+    """Given a ``timeout_ms`` outside ``[100, 60000]``, when constructing ``BrowserConfig``, then it raises ``ValidationError``.
 
-    The WBS acceptance criterion "timeout_ms rejects negative values".
-    The test also rejects ``0``, which is technically non-negative but
-    is not a valid timeout (a zero-millisecond timeout would fail
-    immediately). ``PositiveInt`` is ``int`` with ``gt=0`` — the
-    semantic is "strictly positive", not "non-negative".
+    The WBS 1.2.4 acceptance criterion "timeout_ms rejects negative
+    values" (and the range constraint). The parametrisation covers
+    zero, negative, and the two out-of-range boundaries. The
+    bounds are enforced by ``Annotated[int, Field(ge=100, le=60_000)]``;
+    the lower bound was raised from 1 (``PositiveInt``) to 100 in
+    WBS 1.2.4, so ``99`` is now rejected.
     """
     with pytest.raises(ValidationError) as exc_info:
         BrowserConfig(timeout_ms=invalid_timeout)
     error = exc_info.value.errors()[0]
     assert error["loc"] == ("timeout_ms",)
-    assert "greater than 0" in error["msg"].lower()
+    # The Pydantic message mentions the bound that was violated:
+    # "Input should be greater than or equal to 100" (for values below)
+    # or "Input should be less than or equal to 60000" (for values above).
+    # Assert on the concept ("greater than or equal to 100" or
+    # "less than or equal to 60000"), not the exact Pydantic wording,
+    # so a Pydantic minor version bump does not break the test for a
+    # cosmetic reason.
+    message = error["msg"].lower()
+    if invalid_timeout < 100:
+        assert "greater than or equal to 100" in message, message
+    else:
+        assert "less than or equal to 60000" in message, message
 
 
-@pytest.mark.parametrize("invalid_timeout", [0, -1])
+@pytest.mark.parametrize("invalid_timeout", [0, -1, 301, 1000])
 def test_invalid_api_timeout_rejected(invalid_timeout: int) -> None:
-    """Given a non-positive timeout, when constructing ``APIConfig``, then it raises ``ValidationError``.
+    """Given a ``timeout_seconds`` outside ``[1, 300]``, when constructing ``APIConfig``, then it raises ``ValidationError``.
 
-    Same rule as the browser timeout, applied to ``timeout_seconds``.
+    The bounds are enforced by ``Annotated[int, Field(ge=1, le=300)]``.
+    The lower bound is 1 (not 0 — a zero-second timeout is not
+    meaningful), and the upper bound is 300 (to catch a typo like
+    ``300_000`` from a user thinking the field was milliseconds).
     """
     with pytest.raises(ValidationError):
         APIConfig(timeout_seconds=invalid_timeout)
@@ -255,24 +284,28 @@ def test_invalid_log_level_rejected() -> None:
 # =============================================================================
 
 
-def test_timeout_boundary_minimum() -> None:
-    """Given ``timeout_ms=1``, when constructing ``BrowserConfig``, then it succeeds.
+@pytest.mark.parametrize("boundary", [100, 10_000, 60_000])
+def test_browser_timeout_boundary_values_accepted(boundary: int) -> None:
+    """Given ``timeout_ms`` at or inside ``[100, 60000]``, when constructing ``BrowserConfig``, then it succeeds.
 
-    The boundary of ``PositiveInt``: 1 is the smallest valid value.
-    Guards against a future change that turns ``PositiveInt`` into a
-    strict ``gt=100`` without a corresponding change to the docs.
+    The boundary values (100 and 60_000) are inclusive. The test also
+    covers the default (10_000). This guards against a future change to
+    the bounds (e.g. making them exclusive) without a corresponding
+    change to the docs.
     """
-    cfg = BrowserConfig(timeout_ms=1)
-    assert cfg.timeout_ms == 1
+    cfg = BrowserConfig(timeout_ms=boundary)
+    assert cfg.timeout_ms == boundary
 
 
-def test_timeout_boundary_api_minimum() -> None:
-    """Given ``timeout_seconds=1``, when constructing ``APIConfig``, then it succeeds.
+@pytest.mark.parametrize("boundary", [1, 10, 300])
+def test_api_timeout_boundary_values_accepted(boundary: int) -> None:
+    """Given ``timeout_seconds`` at or inside ``[1, 300]``, when constructing ``APIConfig``, then it succeeds.
 
-    Same boundary as the browser timeout, applied to ``timeout_seconds``.
+    The boundary values (1 and 300) are inclusive. The test also
+    covers the default (10).
     """
-    cfg = APIConfig(timeout_seconds=1)
-    assert cfg.timeout_seconds == 1
+    cfg = APIConfig(timeout_seconds=boundary)
+    assert cfg.timeout_seconds == boundary
 
 
 def test_bool_from_common_string_forms_accepted() -> None:
@@ -359,6 +392,19 @@ def test_nested_sub_model_validation() -> None:
     assert error["loc"] == ("browser", "browser_name")
 
 
+def test_nested_timeout_validation() -> None:
+    """Given a nested dict with an invalid ``timeout_ms``, when constructing ``ForgeQAConfig``, then the error loc includes both levels.
+
+    Same as ``test_nested_sub_model_validation``, for the new
+    ``timeout_ms`` bounds. Guards against a future refactor that
+    loses the section prefix in the error path.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        ForgeQAConfig(browser={"timeout_ms": 50})  # type: ignore[arg-type]
+    error = exc_info.value.errors()[0]
+    assert error["loc"] == ("browser", "timeout_ms")
+
+
 def test_partial_override_uses_defaults_for_unspecified() -> None:
     """Given a partial override, when constructing ``ForgeQAConfig``, then unspecified fields use defaults.
 
@@ -383,6 +429,11 @@ def test_full_config_round_trip_via_dict() -> None:
     the shape a future TOML loader will use (parse TOML → dict → model).
     If a field is not round-trippable (e.g. a custom validator that
     rejects its own output), this test catches it.
+
+    The chosen values exercise the new 1.2.4 constraints: ``timeout_ms``
+    at 30_000 (inside ``[100, 60000]``), ``timeout_seconds`` at 30
+    (inside ``[1, 300]``). The full-config round-trip is the
+    integration test for the whole schema.
     """
     original = ForgeQAConfig(
         general={"environment": "ci", "artifacts_dir": "/tmp/artifacts", "log_level": "DEBUG"},  # type: ignore[arg-type]
