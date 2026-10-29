@@ -6,6 +6,19 @@ the loader that reads a ``forgeqa.toml`` file into those models and
 applies the four-layer precedence hierarchy (see ADR-008 and ADR-009),
 and the environment-variable mapping that feeds the env layer.
 
+**Safe defaults (WBS 1.2.5, ADR-011).** Every field in every model has
+an explicit, safe default, so ``ForgeQAConfig()`` is valid with no
+arguments and with no ``forgeqa.toml`` present. The defaults are chosen
+so a fresh install is runnable against the Phase 0.6 reference app
+without modification — in particular, ``api.base_url`` defaults to
+``http://127.0.0.1:8000`` (the reference app's listen address, chosen
+over ``localhost`` to avoid IPv6 resolution surprises on Linux CI
+images). Every default is documented in ``docs/configuration.md`` §
+"Defaults", asserted one-per-field in
+``tests/unit/config/test_defaults.py``, and validated end-to-end in
+``tests/integration/config/test_defaults_reference_app.py``. A change
+to any default must update all three together.
+
 The public API is:
 
 * :class:`ForgeQAConfig` — the root model; consumers pass this everywhere.
@@ -20,7 +33,7 @@ The public API is:
   current directory (or an explicit path), applies the precedence
   hierarchy CLI > env > TOML > defaults, and returns a
   :class:`ForgeQAConfig`. Falls back to defaults if no file is present
-  and no overrides are set.
+  and no overrides are set — see "Safe defaults" above.
 * :data:`DEFAULT_CONFIG_FILENAME` — the filename ``load_config``
   searches for (``"forgeqa.toml"``).
 * :func:`find_config_path` — the file-search helper. Returns the
@@ -50,7 +63,10 @@ free: it imports ``pydantic`` (a core dependency), ``tomllib`` (stdlib),
 and ``os`` (stdlib), but does **not** read any files, does **not**
 read the environment, and does **not** import Playwright, HTTPX, or
 Pytest. The expensive work happens only when :func:`load_config` is
-called.
+called. This is asserted by
+``tests/unit/config/test_defaults.py::TestNonFunctional::test_construction_does_not_perform_io``
+for the model layer; the loader's no-I/O-when-nothing-is-present path
+is asserted in ``tests/unit/config/test_loader.py``.
 """
 
 from __future__ import annotations
