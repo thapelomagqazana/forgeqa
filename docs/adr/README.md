@@ -13,3 +13,4 @@
 | [006](ADR-006-formalise-the-public-api-surface-and-the-private-module-naming-convention.md) | Formalise the public API surface and the private-module naming convention | Accepted | 2026-10-28 |
 | [007](ADR-007-model-the-forgeqa-configuration-as-a-strictly-typed-pydantic-v2-hierarchy-with-explicit-defaults.md) | Model the ForgeQA configuration as a strictly-typed Pydantic v2 hierarchy with explicit defaults | Accepted | 2026-10-28 |
 | [008](ADR-008-load-forgeqa-toml-into-forgeqaconfig-with-tomllib-and-a-custom-forgeqaconfigerror.md) | Load forgeqa.toml into ForgeQAConfig with tomllib and a custom ForgeQAConfigError | Accepted | 2026-10-28 |
+| [009](ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md) | Resolve configuration precedence as CLI args > environment variables > forgeqa.toml > defaults | Accepted | 2026-10-28 |
