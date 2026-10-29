@@ -18,3 +18,4 @@
 | [011](ADR-011-make-safe-defaults-explicit-and-testable-against-the-reference-app.md) | Make safe defaults explicit and testable against the reference app | Accepted | 2026-10-29 |
 | [012](ADR-012-log-every-config-error-at-error-level-with-a-stable-structured-message.md) | Log every config error at ERROR level with a stable structured message | Accepted | 2026-10-29 |
 | [013](ADR-013-register-forgeqa-as-a-pytest11-plugin-with-a-central-marker-manifest.md) | Register ForgeQA as a pytest11 plugin with a central marker manifest | Accepted | 2026-10-29 |
+| [014](ADR-014-expose-forgeqa-config-as-a-session-scoped-settings-fixture-backed-by-load-config.md) | Expose ForgeQA config as a session-scoped `settings` fixture backed by `load_config` | Accepted | 2026-10-29 |
