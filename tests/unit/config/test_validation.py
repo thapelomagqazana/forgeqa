@@ -7,7 +7,7 @@ These tests cover WBS 1.2.4:
 * Invalid ``browser_name`` raises a clear error listing the valid
   options.
 * The error message does **not** expose internal Pydantic tracebacks
-  (no ``pydantic_core``, no ``[type=…, input_value=…, input_type=…]``
+  (no ``pydantic_core``, no ``[type=..., input_value=..., input_type=...]``
   annotations, no multiline traceback).
 * Every custom validator and every formatted error has a test.
 
@@ -35,6 +35,18 @@ consequence:
 The ``api.timeout_seconds`` lower bound was **not** relaxed — it is
 still ``1``, and values ``0``, ``-1``, ``301``, ``1000`` are still
 rejected. See ADR-011 §Decision #5.
+
+**Relation to ADR-012 (WBS 1.2.6).** ``format_validation_error`` now
+returns a ``(message, fields)`` tuple (see ADR-012 §Decision #6); the
+``message`` is byte-for-byte identical to the pre-1.2.6 string, and
+``fields`` is a ``_ErrorFields`` NamedTuple carrying ``field``,
+``value``, and ``expected`` for structured access. This file unpacks
+the tuple at every call site — a future test that wants to assert on
+the structured fields can read ``fields.field`` etc., but the
+assertions here are about the *string*, so the unpacking uses ``_``
+for the unused half. This is the "comparison semantics, not string
+equality" rule applied to the return type: compare against what the
+contract guarantees, not against a particular shape.
 
 Run only these tests:
 
@@ -76,7 +88,12 @@ def _assert_clean(message: str) -> None:
     Parameters
     ----------
     message
-        The formatted message to check.
+        The formatted message to check. This is the *string* half of
+        the ``(message, fields)`` tuple returned by
+        :func:`format_validation_error` — the caller unpacks the
+        tuple and passes the message here. Passing the tuple itself
+        would raise ``TypeError`` on ``search``; that would be a test
+        bug, not a formatter bug.
 
     Raises
     ------
@@ -120,14 +137,21 @@ def test_invalid_timeout_ms_rejected_with_range(value: int) -> None:
     now legal — they are covered by
     :func:`test_valid_timeout_ms_accepted` with the new boundaries.
     Only ``0`` and negatives are rejected below the lower bound.
+
+    **Return-type note.** ``format_validation_error`` returns
+    ``(message, fields)`` since WBS 1.2.6; the tuple is unpacked here
+    and ``_`` discards the structured half (this test is about the
+    string).
     """
     with pytest.raises(ValidationError) as exc_info:
         BrowserConfig(timeout_ms=value)
 
     error = exc_info.value.errors()[0]
     assert error["loc"] == ("timeout_ms",)
-    # The formatted message names the range and the value.
-    formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
+    # The formatted message names the range and the value. Unpack the
+    # (message, fields) tuple from the 1.2.6 formatter; discard the
+    # structured fields (this test asserts on the string).
+    formatted, _ = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
     assert "timeout_ms" in formatted
     # Range string changed 100→1 in WBS 1.2.5 (see ADR-011 §Decision #5).
     assert "between 1 and 60000" in formatted
@@ -161,10 +185,15 @@ def test_invalid_timeout_seconds_rejected(value: int) -> None:
     The formatted message names the field and the range. The bounds
     are unchanged from WBS 1.2.4 (only ``browser.timeout_ms`` was
     relaxed in WBS 1.2.5).
+
+    **Return-type note.** Same as
+    :func:`test_invalid_timeout_ms_rejected_with_range` — the
+    ``(message, fields)`` tuple is unpacked and the structured half
+    is discarded.
     """
     with pytest.raises(ValidationError) as exc_info:
         APIConfig(timeout_seconds=value)
-    formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
+    formatted, _ = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
     assert "timeout_seconds" in formatted
     assert "between 1 and 300" in formatted
     _assert_clean(formatted)
@@ -191,7 +220,7 @@ def test_invalid_browser_name_lists_valid_options() -> None:
     with pytest.raises(ValidationError) as exc_info:
         BrowserConfig(browser_name="safari")  # type: ignore[arg-type]
 
-    formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
+    formatted, _ = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
     assert "browser_name" in formatted
     assert "one of:" in formatted
     for valid in ("chromium", "firefox", "webkit"):
@@ -247,7 +276,7 @@ def test_artifacts_dir_rejects_existing_file(tmp_path) -> None:
     with pytest.raises(ValidationError) as exc_info:
         GeneralConfig(artifacts_dir=str(file_path))
 
-    formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
+    formatted, _ = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
     assert "existing file" in formatted
     assert str(file_path) in formatted
     _assert_clean(formatted)
@@ -276,7 +305,7 @@ def test_artifacts_dir_rejects_unwritable_parent(tmp_path) -> None:
         with pytest.raises(ValidationError) as exc_info:
             GeneralConfig(artifacts_dir=str(read_only / "subdir"))
 
-        formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
+        formatted, _ = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
         assert "not writable" in formatted
         _assert_clean(formatted)
     finally:
@@ -300,6 +329,11 @@ def test_loader_wraps_timeout_error_without_traceback(tmp_path, monkeypatch) -> 
     ``ge=1`` lower bound). The pre-1.2.5 version used ``50``, which is
     now legal (see ADR-011 §Decision #5) and therefore would not
     raise.
+
+    **Exception-shape note.** ``str(exc_info.value)`` is the
+    human-readable message (unchanged by WBS 1.2.6); the new
+    structured fields are on the exception's attributes and are
+    asserted in ``test_errors.py``. This test is about the message.
     """
     (tmp_path / "forgeqa.toml").write_text("[browser]\ntimeout_ms = 0\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -404,11 +438,16 @@ def test_format_validation_error_toml_layer() -> None:
     version of this test to fail with ``UnboundLocalError`` (the
     ``except`` block never ran, so the local ``message`` was never
     assigned).
+
+    **Return-type note.** ``format_validation_error`` returns
+    ``(message, fields)`` since WBS 1.2.6; the tuple is unpacked
+    here so ``message`` remains a ``str``. The structured half is
+    discarded (this test asserts on the string prefix).
     """
     try:
         BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
-        message = format_validation_error(exc, layer="TOML", path="/p/forgeqa.toml")
+        message, _ = format_validation_error(exc, layer="TOML", path="/p/forgeqa.toml")
     assert message.startswith("Invalid configuration in /p/forgeqa.toml: ")
     assert "browser.timeout_ms" in message or "timeout_ms" in message
 
@@ -423,7 +462,7 @@ def test_format_validation_error_env_layer() -> None:
     try:
         BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
-        message = format_validation_error(exc, layer="environment variable")
+        message, _ = format_validation_error(exc, layer="environment variable")
     assert message.startswith("Invalid environment variable: ")
 
 
@@ -437,7 +476,7 @@ def test_format_validation_error_cli_layer() -> None:
     try:
         BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
-        message = format_validation_error(exc, layer="CLI override")
+        message, _ = format_validation_error(exc, layer="CLI override")
     assert message.startswith("Invalid CLI override: ")
 
 
@@ -460,7 +499,7 @@ def test_format_validation_error_with_multiple_errors() -> None:
             api={"timeout_seconds": 999},
         )
     except ValidationError as exc:
-        message = format_validation_error(exc, layer="TOML", path="forgeqa.toml")
+        message, _ = format_validation_error(exc, layer="TOML", path="forgeqa.toml")
     assert "(and 1 more)" in message
 
 
@@ -469,6 +508,6 @@ def test_format_validation_error_extra_forbidden() -> None:
     try:
         BrowserConfig(**{"timout_ms": 1000})  # type: ignore[arg-type]
     except ValidationError as exc:
-        message = format_validation_error(exc, layer="TOML", path="forgeqa.toml")
+        message, _ = format_validation_error(exc, layer="TOML", path="forgeqa.toml")
     assert "unexpected field: timout_ms" in message
     _assert_clean(message)

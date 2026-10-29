@@ -37,10 +37,17 @@ model gives fully-typed sub-model instances.
 fails validation, the loader formats the ``ValidationError`` via
 :func:`forgeqa.config.errors.format_validation_error` into a
 single-line message naming the field, the constraint, and the
-offending value (e.g. ``"browser.timeout_ms must be between 100 and
-60000, got 50"``). The raw Pydantic traceback is **not** included; the
+offending value (e.g. ``"browser.timeout_ms must be between 1 and
+60000, got 0"``). The raw Pydantic traceback is **not** included; the
 underlying exception is preserved as ``__cause__`` for debugging. See
 ADR-010 and ``docs/configuration.md`` §"Validation".
+
+**Every error is logged at ERROR level.** The log record is emitted by
+:class:`ForgeQAConfigError`'s constructor, not by this module — see
+ADR-012. The loader's job is to raise the right exception; the
+exception class guarantees the log. This means a future loader (e.g. a
+JSON-config adapter) that raises the same exception class gets the
+same logging for free, without a separate log call.
 
 The loader is intentionally narrow. It does not:
 
@@ -50,6 +57,14 @@ The loader is intentionally narrow. It does not:
 * Cache the result across calls (each call reads the file and the
   environment fresh; see the "Determinism" note in
   ``docs/configuration.md``).
+
+See also
+--------
+* ADR-008 — the loader's existence and search behaviour
+* ADR-009 — the precedence hierarchy
+* ADR-010 — the error formatter (message shape)
+* ADR-011 — safe defaults (bounds referenced in the examples)
+* ADR-012 — logging at ERROR level (this WBS)
 """
 
 from __future__ import annotations
@@ -128,6 +143,13 @@ def _read_toml(path: Path | str | None) -> tuple[dict[str, Any], Path | None]:
     ForgeQAConfigError
         If the file is present but cannot be read (including a
         non-UTF-8 encoding), or is not valid TOML.
+
+    Notes
+    -----
+    Every raised error passes ``layer="TOML"`` and ``path=`` so the
+    exception carries structured fields for a caller that wants them.
+    The exception's constructor emits the ERROR-level log record; this
+    function does not log directly. See ADR-012.
     """
     resolved: Path | None
     if path is None:
@@ -139,6 +161,7 @@ def _read_toml(path: Path | str | None) -> tuple[dict[str, Any], Path | None]:
         if not resolved.is_file():
             raise ForgeQAConfigError(
                 f"Config file not found: {resolved}",
+                layer="TOML",
                 path=str(resolved),
             )
 
@@ -147,6 +170,7 @@ def _read_toml(path: Path | str | None) -> tuple[dict[str, Any], Path | None]:
     except (OSError, UnicodeDecodeError) as exc:
         raise ForgeQAConfigError(
             f"Could not read config file {resolved}: {exc}",
+            layer="TOML",
             path=str(resolved),
         ) from exc
 
@@ -155,6 +179,7 @@ def _read_toml(path: Path | str | None) -> tuple[dict[str, Any], Path | None]:
     except tomllib.TOMLDecodeError as exc:
         raise ForgeQAConfigError(
             f"Invalid TOML in {resolved}: {exc}",
+            layer="TOML",
             path=str(resolved),
         ) from exc
 
@@ -250,10 +275,15 @@ def _validate_layer(
         If ``data`` is not a valid partial override. The message is
         produced by :func:`forgeqa.config.errors.format_validation_error`
         — a single line naming the field, the constraint, and the
-        offending value (e.g. ``"browser.timeout_ms must be between
-        100 and 60000, got 50"``), plus the layer identifier (TOML
-        file path / env var name / "CLI override"). No Pydantic
-        traceback is included.
+        offending value (e.g. ``"browser.timeout_ms must be between 1
+        and 60000, got 0"``), plus the layer identifier (TOML file
+        path / env var name / "CLI override"). No Pydantic traceback
+        is included.
+
+        The exception also carries structured fields (``layer``,
+        ``path``, ``field``, ``value``, ``expected``) so a caller can
+        identify the failing field without parsing the message. See
+        ADR-012.
 
     Notes
     -----
@@ -265,6 +295,11 @@ def _validate_layer(
     dicts and constructs the final config once.
 
     Empty ``data`` is a no-op — an absent layer is not "invalid".
+
+    Logging: this function does not log. The
+    :class:`ForgeQAConfigError` constructor emits the ERROR-level
+    record. Every ``raise`` site below is therefore logging-free; see
+    ADR-012 §Decision #1 for why.
     """
     if not data:
         return
@@ -278,9 +313,18 @@ def _validate_layer(
     except ValidationError as exc:
         if layer_name == "TOML":
             path_part = str(toml_path) if toml_path is not None else "(unknown path)"
+            # Unpack the (message, fields) tuple from the 1.2.6
+            # formatter so the exception carries structured fields.
+            # The message is byte-for-byte identical to the pre-1.2.6
+            # string; the fields are the new, additive part.
+            message, fields = format_validation_error(exc, layer="TOML", path=path_part)
             raise ForgeQAConfigError(
-                format_validation_error(exc, layer="TOML", path=path_part),
+                message,
+                layer="TOML",
                 path=path_part,
+                field=fields.field,
+                value=fields.value,
+                expected=fields.expected,
             ) from exc
         if layer_name == "environment variable":
             # Prepend the env var name(s) so the user knows which var
@@ -289,13 +333,24 @@ def _validate_layer(
             # the user needs for an env-var layer.
             culprits = _env_vars_for_validation_errors(exc, data)
             var_list = ", ".join(culprits) if culprits else "<unknown>"
-            formatted = format_validation_error(exc, layer="environment variable")
+            message, fields = format_validation_error(exc, layer="environment variable")
             raise ForgeQAConfigError(
-                f"Invalid value in environment variable(s) {var_list}: {formatted}",
+                f"Invalid value in environment variable(s) {var_list}: {message}",
+                layer="environment variable",
+                path=None,
+                field=fields.field,
+                value=fields.value,
+                expected=fields.expected,
             ) from exc
         # layer_name == "CLI override"
+        message, fields = format_validation_error(exc, layer="CLI override")
         raise ForgeQAConfigError(
-            format_validation_error(exc, layer="CLI override"),
+            message,
+            layer="CLI override",
+            path=None,
+            field=fields.field,
+            value=fields.value,
+            expected=fields.expected,
         ) from exc
 
 
@@ -348,8 +403,11 @@ def load_config(
         the final merged config is invalid. The message names the
         failing layer and, for field-level errors, the field path,
         the constraint, and the offending value (e.g. ``"browser.
-        timeout_ms must be between 100 and 60000, got 50"``). No
-        Pydantic traceback is included.
+        timeout_ms must be between 1 and 60000, got 0"``). No
+        Pydantic traceback is included. The exception also carries
+        structured ``field`` / ``value`` / ``expected`` attributes
+        (see ADR-012) and is logged at ERROR level by its
+        constructor.
 
     Notes
     -----
@@ -387,17 +445,22 @@ def load_config(
     **Error message shape.** TOML syntax errors: ``"Invalid TOML in
     /path: ..."``. Field-level errors (from any layer) are single-line
     and human-readable via
-    :func:`forgeqa.config.errors.format_validation_error`; examples:
+    :func:`forgeqa.config.errors.format_validation_error`; examples
+    (bounds shown are the WBS 1.2.5 values):
 
     - TOML: ``"Invalid configuration in /path/to/forgeqa.toml:
-      browser.timeout_ms must be between 100 and 60000, got 50"``
+      browser.timeout_ms must be between 1 and 60000, got 0"``
     - Env:  ``"Invalid value in environment variable(s)
       FORGEQA_BROWSER_TIMEOUT_MS: browser.timeout_ms must be between
-      100 and 60000, got 50"``
+      1 and 60000, got 0"``
     - CLI:  ``"Invalid CLI override: browser.timeout_ms must be
-      between 100 and 60000, got 50"``
+      between 1 and 60000, got 0"``
 
     No Pydantic traceback is included in any of these.
+
+    **Logging.** Every raised :class:`ForgeQAConfigError` is logged at
+    ERROR level to ``"forgeqa.config.errors"`` by the exception's
+    constructor. This function does not log directly. See ADR-012.
     """
     # --- Read and validate each layer in isolation ------------------------
     toml_data, toml_path = _read_toml(path)
@@ -440,10 +503,21 @@ def load_config(
         # present, otherwise gives a generic message. The formatted
         # message is single-line and human-readable (no traceback).
         if toml_path is not None:
+            message, fields = format_validation_error(exc, layer="TOML", path=str(toml_path))
             raise ForgeQAConfigError(
-                format_validation_error(exc, layer="TOML", path=str(toml_path)),
+                message,
+                layer="TOML",
                 path=str(toml_path),
+                field=fields.field,
+                value=fields.value,
+                expected=fields.expected,
             ) from exc
+        message, fields = format_validation_error(exc, layer="CLI override")
         raise ForgeQAConfigError(
-            format_validation_error(exc, layer="CLI override"),
+            message,
+            layer="CLI override",
+            path=None,
+            field=fields.field,
+            value=fields.value,
+            expected=fields.expected,
         ) from exc

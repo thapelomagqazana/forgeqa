@@ -14,15 +14,18 @@ decision). The loader is `src/forgeqa/config/loader.py` (see
 for its design decisions). The error formatter that turns Pydantic's
 raw validation error into a single-line, user-facing message is
 `src/forgeqa/config/errors.py` (see
-[ADR-010](adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md)).
+[ADR-010](adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md)
+and [ADR-012](adr/ADR-012-log-every-config-error-at-error-level-with-a-stable-structured-message.md)).
 The model is a Pydantic v2 hierarchy — invalid values fail at parse
 time with a message that names the field, the constraint, and the
 offending value; it does not include a Python traceback.
 
 **Status:** the schema (WBS 1.2.1), the loader (WBS 1.2.2), the
-precedence hierarchy (WBS 1.2.3), and field-level validation with
-formatted errors (WBS 1.2.4) are all implemented. This document
-describes the actual behaviour, not a target.
+precedence hierarchy (WBS 1.2.3), field-level validation with
+formatted errors (WBS 1.2.4), safe defaults (WBS 1.2.5), and
+error handling with structured fields and ERROR-level logging
+(WBS 1.2.6) are all implemented. This document describes the actual
+behaviour, not a target.
 
 ---
 
@@ -208,21 +211,24 @@ Each layer reports errors with the layer's identifying information and
 a field-level, human-readable description:
 
 - **CLI override errors** name the offending key and the constraint,
-  e.g. `"Invalid CLI override: browser.timeout_ms must be between 100
-  and 60000, got 50"`.
+  e.g. `"Invalid CLI override: browser.timeout_ms must be between 1
+  and 60000, got 0"`.
 - **Environment variable errors** name the offending var and the
   constraint, e.g. `"Invalid value in environment variable(s)
   FORGEQA_BROWSER_TIMEOUT_MS: Invalid environment variable:
-  browser.timeout_ms must be between 100 and 60000, got 50"`.
+  browser.timeout_ms must be between 1 and 60000, got 0"`.
 - **TOML errors** name the offending file and the constraint, e.g.
   `"Invalid configuration in /path/to/forgeqa.toml:
-  browser.timeout_ms must be between 100 and 60000, got 50"`.
+  browser.timeout_ms must be between 1 and 60000, got 0"`.
 
 An invalid value at a *lower* layer raises even if a *higher* layer
 overrides the field. This is intentional: an invalid env var is a bug
 in the environment, and silently letting a CLI override "fix" it would
 mask the bug. To silence the error, fix or unset the offending value
 at its own layer.
+
+Every error is also **logged at ERROR level** to
+`forgeqa.config.errors` — see ["Error logging"](#error-logging) below.
 
 ### Determinism
 
@@ -296,6 +302,8 @@ try:
 except ForgeQAConfigError as exc:
     print(f"Configuration error: {exc}")
     # exc.path is the file that failed, if a file was involved.
+    # exc.field / exc.value / exc.expected are structured accessors
+    # (see "Structured fields" below).
     raise
 ```
 
@@ -306,7 +314,7 @@ except ForgeQAConfigError as exc:
   line and column.
 - **Invalid TOML values.** The file parses as TOML but does not
   produce a valid `ForgeQAConfig` (e.g. `browser_name = "safari"`,
-  `timeout_ms = 50`, an unknown key). The message includes the file
+  `timeout_ms = 0`, an unknown key). The message includes the file
   path and a **human-readable** field-level description (see
   ["Validation"](#validation) below).
 - **Invalid env var values.** A known `FORGEQA_*` var has a value that
@@ -324,6 +332,39 @@ The original exception (`TOMLDecodeError`, `ValidationError`,
 `OSError`, or `UnicodeDecodeError`) is preserved as `exc.__cause__`
 for debugging. The user-facing message does **not** include Pydantic's
 raw traceback or internal type annotations.
+
+### Structured fields on the exception
+
+Since WBS 1.2.6, every `ForgeQAConfigError` also carries five
+**structured attributes** in addition to the message. A caller that
+needs to programmatically identify the failure does not need to
+regex-parse the message — read the attributes:
+
+| Attribute | Type | Meaning |
+| :--- | :--- | :--- |
+| `exc.layer` | `str` | `"TOML"`, `"environment variable"`, or `"CLI override"`. Always set. |
+| `exc.path` | `str \| None` | The file path, for TOML-layer errors. `None` for env/CLI. |
+| `exc.field` | `str \| None` | The dotted field path, e.g. `"browser.timeout_ms"`. `None` if the error is not field-specific (e.g. a TOML syntax error). |
+| `exc.value` | `str \| None` | The stringified offending value. `None` if not applicable (e.g. a missing-file error). |
+| `exc.expected` | `str \| None` | A constraint phrase, e.g. `"between 1 and 60000"` or `"one of: 'chromium', 'firefox' or 'webkit'"`. `None` if the error has no "expected value" (e.g. `unexpected field`). |
+
+Example:
+
+```python
+from forgeqa.config import ForgeQAConfigError, load_config
+
+try:
+    cfg = load_config(environ={"FORGEQA_BROWSER_TIMEOUT_MS": "0"})
+except ForgeQAConfigError as exc:
+    print(exc.layer)  # "environment variable"
+    print(exc.path)  # None
+    print(exc.field)  # "browser.timeout_ms"
+    print(exc.value)  # "0"
+    print(exc.expected)  # "between 1 and 60000"
+```
+
+The attributes are stable; the message is human-facing and may be
+adjusted for readability. Read the attributes, not the string.
 
 ### Determinism
 
@@ -426,14 +467,14 @@ browser_name = "chromium"
 headless = true
 base_url = "http://localhost:8000"
 timeout_ms = 10_000
+screenshot_on_failure = true
+trace_on_failure = true
 
 [api]
-base_url = "http://localhost:8000/api"
+base_url = "http://127.0.0.1:8000"
 timeout_seconds = 10
 
 [diagnostics]
-screenshots = true
-traces = true
 console_logs = true
 
 [reporting]
@@ -457,7 +498,7 @@ defaults.
 | :--- | :--- | :--- | :--- |
 | `environment` | `str` (min length 1) | `"local"` | The environment label: `"local"`, `"ci"`, `"staging"`, `"production"`, or anything else. Used for environment overlays (Phase 1) and artifact tagging (Phase 3). |
 | `artifacts_dir` | `str` (min length 1) | `"artifacts"` | Directory where ForgeQA writes diagnostic artifacts. Relative to the working directory unless absolute. Created on first write. The validator checks that the path *can* be created (nearest existing ancestor is writable) but does not create it. See ["Field-level constraints"](#field-level-constraints). |
-| `log_level` | `Literal["DEBUG", "INFO", "WARNING", "ERROR"]` | `"INFO"` | The framework's log level. Applied to the `forgeqa` logger, not the root logger. `"TRACE"` and `"CRITICAL"` are not accepted — see ["Why not `CRITICAL`?"](#why-not-critical) below. |
+| `log_level` | `Literal["DEBUG", "INFO", "WARNING", "ERROR"]` | `"INFO"` | The framework's log level. Applied to the `forgeqa` logger, not the root logger. `"TRACE"` and `"CRITICAL"` are not accepted — see ["Why not `CRITICAL`?"](#why-not-critical) and ["Why not `TRACE`?"](#why-not-trace) below. |
 
 ### `[browser]`
 
@@ -469,7 +510,21 @@ not import Playwright; the model is constructible even in a core install.
 | `browser_name` | `Literal["chromium", "firefox", "webkit"]` | `"chromium"` | The browser engine. Adding a new engine requires a corresponding ForgeQA adapter update; it is not a user-configurable choice. |
 | `headless` | `bool` | `true` | Whether to run headless. `false` opens a real browser window for debugging. |
 | `base_url` | `AnyHttpUrl` | `http://localhost:8000` | Base URL for relative navigation. Must be an `http` or `https` URL with a valid host. |
-| `timeout_ms` | `int`, must be between 100 and 60000 (inclusive) | `10_000` | Default navigation and action timeout, in milliseconds. See ["Field-level constraints"](#field-level-constraints). |
+| `timeout_ms` | `int`, must be between 1 and 60000 (inclusive) | `10_000` | Default navigation and action timeout, in milliseconds. See ["Field-level constraints"](#field-level-constraints). |
+| `screenshot_on_failure` | `bool` | `true` | Capture a screenshot when a UI test fails. Requires `forgeqa[ui]`. Evidence-first default — see ["Why these defaults?"](#why-these-defaults). |
+| `trace_on_failure` | `bool` | `true` | Capture a Playwright trace when a UI test fails. Larger than a screenshot (a few MB), but contains the full interaction log. Requires `forgeqa[ui]`. Evidence-first default — see ["Why these defaults?"](#why-these-defaults). |
+
+> **Naming note (WBS 1.2.5 / ADR-011 §Decision #3).** The failure-evidence
+> flags live on `[browser]` (`screenshot_on_failure`, `trace_on_failure`),
+> not on `[diagnostics]`, because they are browser concepts (Playwright
+> screenshot, Playwright trace) and keeping them on `[diagnostics]`
+> created two sources of truth. The pre-1.2.5 `[diagnostics] screenshots`
+> and `[diagnostics] traces` keys are **rejected** by `extra="forbid"`
+> — a config that copies them from a blog post or a stale README gets a
+> loud `unexpected field: screenshots` error naming the offending key.
+> This is a deliberate clean break (pre-alpha, no external consumers);
+> the `[diagnostics]` section is now scoped to *non-browser* diagnostic
+> capture (`console_logs`).
 
 ### `[api]`
 
@@ -477,18 +532,35 @@ Only meaningful when `forgeqa[api]` is installed.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `base_url` | `AnyHttpUrl` | `http://localhost:8000/api` | Base URL for API requests. Must be an `http` or `https` URL. |
+| `base_url` | `AnyHttpUrl` | `http://127.0.0.1:8000` | Base URL for API requests. Must be an `http` or `https` URL. |
 | `timeout_seconds` | `int`, must be between 1 and 300 (inclusive) | `10` | Default request timeout, in seconds. See ["Field-level constraints"](#field-level-constraints). |
+
+> **Reference-app coupling (WBS 1.2.5 / ADR-011 §Decision #2).** The
+> `api.base_url` default is the Phase 0.6 reference app's origin. It is
+> the **only** default in the whole config that is coupled to a specific
+> external service; it is what makes "install ForgeQA, run `pytest`"
+> produce a run against *something real* on a fresh checkout. Two notes:
+>
+> - The host is `127.0.0.1` (IPv4 explicit), **not** `localhost`. On some
+>   Linux CI images `localhost` resolves to `::1` first and the reference
+>   app binds IPv4 only — a fresh install would fail on such images.
+> - There is **no `/api` path suffix.** The reference app's health
+>   endpoint is `/health`, and a "base URL" conventionally carries no
+>   path suffix. The `api_client` fixture (Phase 1) will resolve relative
+>   paths against this.
+>
+> The coupling is revisited when the MVP ships; see ADR-011
+> §Reconsideration Trigger.
 
 ### `[diagnostics]`
 
-Controls *capture*. The counterpart is `[reporting]`, which controls
-*emission*.
+Controls *capture* of diagnostic evidence that is **not** browser-specific.
+The browser-specific evidence flags (`screenshot_on_failure`,
+`trace_on_failure`) live on `[browser]` — see the naming note above. The
+counterpart to `[diagnostics]` is `[reporting]`, which controls *emission*.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `screenshots` | `bool` | `true` | Capture a screenshot on UI test failure. Requires `forgeqa[ui]`. |
-| `traces` | `bool` | `true` | Capture a Playwright trace on UI test failure. Larger than a screenshot (a few MB), but contains the full interaction log. Requires `forgeqa[ui]`. |
 | `console_logs` | `bool` | `true` | Capture browser console logs for UI tests. Requires `forgeqa[ui]`. |
 
 Capture is enabled by default because a test framework whose default
@@ -551,15 +623,21 @@ ForgeQAConfigError: ... browser.browser_name must be one of: 'chromium', 'firefo
 ```
 
 ```
-$ # Invalid timeout (below range)
-$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=50)" 2>&1 | head -2
-ForgeQAConfigError: ... browser.timeout_ms must be between 100 and 60000, got 50
+$ # Invalid timeout (below range; WBS 1.2.5 lower bound is 1)
+$ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=0)" 2>&1 | head -2
+ForgeQAConfigError: ... browser.timeout_ms must be between 1 and 60000, got 0
 ```
 
 ```
 $ # Invalid timeout (above range)
 $ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timeout_ms=60_001)" 2>&1 | head -2
-ForgeQAConfigError: ... browser.timeout_ms must be between 100 and 60000, got 60001
+ForgeQAConfigError: ... browser.timeout_ms must be between 1 and 60000, got 60001
+```
+
+```
+$ # Invalid timeout_seconds
+$ python -c "from forgeqa.config import APIConfig; APIConfig(timeout_seconds=301)" 2>&1 | head -2
+ForgeQAConfigError: ... api.timeout_seconds must be between 1 and 300, got 301
 ```
 
 ```
@@ -574,11 +652,18 @@ $ python -c "from forgeqa.config import BrowserConfig; BrowserConfig(timout_ms=1
 ForgeQAConfigError: ... browser.timout_ms unexpected field: timout_ms
 ```
 
+```
+$ # Pre-1.2.5 field name (moved to [browser] in WBS 1.2.5)
+$ python -c "from forgeqa.config import DiagnosticsConfig; DiagnosticsConfig(screenshots=False)" 2>&1 | head -2
+ForgeQAConfigError: ... diagnostics.screenshots unexpected field: screenshots
+```
+
 When these errors occur during `load_config` (i.e. from a real
 `forgeqa.toml` file), they are wrapped in `ForgeQAConfigError` with the
 file path prepended — see [Loading configuration](#loading-configuration)
 above. An invalid env var or CLI override is likewise wrapped, with the
-env var name or CLI key in the message.
+env var name or CLI key in the message. All three cases log at ERROR
+level — see ["Error logging"](#error-logging).
 
 The full set of validation rules is tested by
 `tests/unit/config/test_models.py` (acceptance: "is this value
@@ -607,10 +692,10 @@ A clear error:
 1. **Names the field, with its section.** `browser.timeout_ms`, not
    just `timeout_ms`. This matters when the same field name exists in
    multiple sections.
-2. **Names the valid range or options.** `"between 100 and 60000"`,
+2. **Names the valid range or options.** `"between 1 and 60000"`,
    `"one of: 'chromium', 'firefox' or 'webkit'"`. The user does not
    have to grep the source to find the bound or the valid values.
-3. **Names the offending value.** `"got 50"`, `"got 'safari'"`. The
+3. **Names the offending value.** `"got 0"`, `"got 'safari'"`. The
    user can compare against the range without opening the file.
 4. **Is one line.** No multi-line traceback, no internal annotations.
 5. **Is actionable.** The user knows what to change after reading the
@@ -626,13 +711,21 @@ The following fields have explicit constraints beyond their type:
 | Field | Constraint | Message on violation |
 | :--- | :--- | :--- |
 | `browser.browser_name` | One of `"chromium"`, `"firefox"`, `"webkit"`. | `must be one of: 'chromium', 'firefox' or 'webkit'` |
-| `browser.timeout_ms` | Integer between `100` and `60000` (inclusive). | `must be between 100 and 60000, got <value>` |
+| `browser.timeout_ms` | Integer between `1` and `60000` (inclusive). | `must be between 1 and 60000, got <value>` |
 | `api.timeout_seconds` | Integer between `1` and `300` (inclusive). | `must be between 1 and 300, got <value>` |
 | `general.artifacts_dir` | Creatable: if the path exists, it must be a directory; if not, the nearest existing ancestor must be a writable directory. The validator does **not** create the directory — it is created on first write. | `must be a creatable directory: <specific reason>` (e.g. `parent is not writable: /path`, `points at an existing file, not a directory: /path`) |
 | `general.log_level` | One of `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`. | `must be one of: 'DEBUG', 'INFO', 'WARNING' or 'ERROR'` |
 | `browser.base_url`, `api.base_url` | A valid `http` or `https` URL. | `Input should be a valid URL` (Pydantic's fallback) |
 | `general.environment`, `general.artifacts_dir` | Non-empty string (`min_length=1`). | `must be at least 1 characters` (Pydantic's one-sided fallback) |
-| `diagnostics.screenshots`, `diagnostics.traces`, `diagnostics.console_logs`, `reporting.junit_xml`, `reporting.json_report` | A boolean. Pydantic accepts the usual string forms (`"true"/"false"`, `"yes"/"no"`, `"on"/"off"`, `"1"/"0"`, case-insensitive); ambiguous strings like `"maybe"` are rejected. | Pydantic's `Input should be a valid boolean` |
+| `browser.headless`, `browser.screenshot_on_failure`, `browser.trace_on_failure`, `diagnostics.console_logs`, `reporting.junit_xml`, `reporting.json_report` | A boolean. Pydantic accepts the usual string forms (`"true"/"false"`, `"yes"/"no"`, `"on"/"off"`, `"1"/"0"`, case-insensitive); ambiguous strings like `"maybe"` are rejected. | Pydantic's `Input should be a valid boolean` |
+
+> **Range note (WBS 1.2.5 / ADR-011 §Decision #5).** The
+> `browser.timeout_ms` lower bound was relaxed from `100` to `1` in
+> WBS 1.2.5. The relaxation exists because the WBS 1.2.5 boundary test
+> requires `timeout_ms=1` to be legal; the lower bound's job is to
+> reject `0` and negatives (a zero timeout silently breaks Playwright's
+> default-timeout resolution), not to reject "impractically small but
+> legal" values. `api.timeout_seconds`'s `[1, 300]` bound is unchanged.
 
 The full set of validation rules is tested by
 `tests/unit/config/test_models.py` and `tests/unit/config/test_validation.py`.
@@ -667,10 +760,103 @@ the release notes.
 
 ---
 
+## Error logging
+
+Since WBS 1.2.6, **every** `ForgeQAConfigError` is logged at ERROR
+level to the `forgeqa.config.errors` logger (a child of
+`forgeqa.config`) when the exception is constructed. The log record's
+message is the same single-line, human-readable string as
+`str(error)`, and the record carries structured extras (`forgeqa_layer`,
+`forgeqa_path`, `forgeqa_field`, `forgeqa_value`, `forgeqa_expected`)
+that a structured handler (JSON, etc.) can consume.
+
+The library **does not** install a handler. Handlers, levels, and
+formatters are the *application's* configuration, not the library's.
+This is the standard "logging is configured by the application, not
+the library" rule.
+
+### Default behaviour
+
+With no logging configuration, Python's `logging` module sends WARNING
+and above to `stderr` via a last-resort handler. Because config errors
+are emitted at ERROR, a user who runs `pytest` without any logging
+configuration still sees them on stderr. This is the "if you didn't
+catch the exception, you should still see it" signal.
+
+```
+$ python -c "from forgeqa.config import load_config; load_config(environ={'FORGEQA_BROWSER_TIMEOUT_MS': '0'})" 2>&1 | head -2
+ERROR:forgeqa.config.errors:Invalid value in environment variable(s) FORGEQA_BROWSER_TIMEOUT_MS: Invalid environment variable: browser.timeout_ms must be between 1 and 60000, got 0
+ForgeQAConfigError: Invalid value in environment variable(s) FORGEQA_BROWSER_TIMEOUT_MS: Invalid environment variable: browser.timeout_ms must be between 1 and 60000, got 0
+```
+
+The first line is the log record; the second is the raised exception's
+traceback (because the exception was not caught). Both appear, and
+both say the same thing — the user gets the message whether or not
+their code catches the exception.
+
+### Silencing config errors
+
+If you handle `ForgeQAConfigError` explicitly and do not want the
+stderr line, silence the logger:
+
+```python
+import logging
+
+logging.getLogger("forgeqa.config").addHandler(logging.NullHandler())
+logging.getLogger("forgeqa.config").propagate = False
+```
+
+Note: this only silences the *log* line. The exception is still
+raised.
+
+### Structured logging
+
+A handler that wants the structured fields can inspect the record:
+
+```python
+import json
+import logging
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        if record.name.startswith("forgeqa.config"):
+            return json.dumps(
+                {
+                    "level": record.levelname,
+                    "message": record.getMessage(),
+                    "layer": getattr(record, "forgeqa_layer", None),
+                    "path": getattr(record, "forgeqa_path", None),
+                    "field": getattr(record, "forgeqa_field", None),
+                    "value": getattr(record, "forgeqa_value", None),
+                    "expected": getattr(record, "forgeqa_expected", None),
+                }
+            )
+        return super().format(record)
+```
+
+### Why ERROR, not CRITICAL or WARNING
+
+- **CRITICAL** means "the process cannot continue". A bad config is
+  *recoverable*: the user edits the file and re-runs.
+- **WARNING** means "you might want to know about this". A bad config
+  is *fatal for the run*: the config does not produce a valid
+  `ForgeQAConfig`, so the run cannot start.
+
+ERROR is the right level: it is fatal for this operation, and it is
+recoverable for the process.
+
+See [ADR-012](adr/ADR-012-log-every-config-error-at-error-level-with-a-stable-structured-message.md)
+for the rationale.
+
+---
+
 ## Why these defaults?
 
 The defaults are chosen so that `ForgeQAConfig()` (no config file, no
-arguments) is a *useful* configuration, not just a valid one:
+arguments) is a *useful* configuration, not just a valid one. See
+[ADR-011](adr/ADR-011-make-safe-defaults-explicit-and-testable-against-the-reference-app.md)
+for the design decision and every default's rationale.
 
 - **`environment = "local"`** — the safest default; a user who never
   sets it gets the "I'm on my machine" behaviour.
@@ -688,16 +874,29 @@ arguments) is a *useful* configuration, not just a valid one:
   navigate is usually a test that will be flaky in CI anyway.
 - **`timeout_seconds = 10`** — HTTPX's default is 5 s; 10 s
   accommodates slow test environments without hiding a hung API.
-- **All `[diagnostics]` fields `true`** — evidence-first. A test
+- **`browser.screenshot_on_failure = true`** and
+  **`browser.trace_on_failure = true`** — evidence-first. A test
   framework that captures nothing on failure provides no evidence.
+  Opting *out* should be a conscious choice.
+- **`diagnostics.console_logs = true`** — evidence-first for
+  JavaScript-driven apps.
 - **All `[reporting]` fields `true`** — JUnit XML is CI-native;
   structured JSON is durable.
 - **`browser_name = "chromium"`** — the most common Playwright engine
   in CI, with the widest CI-runner support.
+- **`api.base_url = "http://127.0.0.1:8000"`** — the Phase 0.6
+  reference app; the only default coupled to a specific external
+  service. See the note in §`[api]` above and ADR-011 §Decision #2.
 
 Changing a default is a semver-minor event (it changes install
 behaviour for consumers who rely on the default). It is documented in
-the release notes and in this section.
+the release notes, in this section, and in ADR-011.
+
+The defaults are individually asserted in
+`tests/unit/config/test_defaults.py` (one test per field) and
+validated end-to-end against the reference app in
+`tests/integration/config/test_defaults_reference_app.py`. A default
+change that does not update both is a bug.
 
 ---
 
@@ -837,6 +1036,14 @@ An invalid URL (`"not-a-url"`, `"http://"`, `"ftp://example.com"`, `""`)
 fails at parse time. The `AnyHttpUrl` type rejects anything without a
 valid scheme and host.
 
+> **URL rendering note.** `AnyHttpUrl` normalises the bare-origin form
+> to include a trailing slash: `AnyHttpUrl("http://127.0.0.1:8000")`
+> renders as `"http://127.0.0.1:8000/"`. If you compare the rendered
+> string in your own code, normalise the trailing slash first, or
+> compare against `AnyHttpUrl(...)` values (which handle the
+> normalisation consistently). ForgeQA's own tests use the latter; see
+> ADR-011 §Lessons learnt for why.
+
 ---
 
 ## The fallback `"0.0.0+unknown"` version
@@ -852,9 +1059,9 @@ public-api doc.
 
 ---
 
-## Schema, loader, precedence, and validation are separate concerns
+## Schema, loader, precedence, validation, and error handling are separate concerns
 
-The configuration is split across four modules with distinct
+The configuration is split across five modules with distinct
 responsibilities:
 
 - **The schema** (`src/forgeqa/config/models.py`, ADR-007) defines
@@ -872,13 +1079,18 @@ responsibilities:
   turns Pydantic's raw `ValidationError` into the single-line,
   human-readable message documented in ["Validation"](#validation).
   Tested by `tests/unit/config/test_validation.py`.
+- **The logger** (`src/forgeqa/config/logging.py`, ADR-012) is the
+  per-module logger factory and level constant. It is what
+  `errors.py` uses to emit the ERROR-level record every config error
+  produces. Tested by `tests/unit/config/test_errors.py`.
 
 Splitting them means a schema change is testable without I/O, a loader
 change is testable without re-testing the schema, the precedence change
-is testable without re-testing either, and the message formatter is
-testable without going through the loader. It also means a consumer
-who wants to construct a config in Python (e.g. in a test fixture) can
-do so without touching a file or the environment:
+is testable without re-testing either, the message formatter is
+testable without going through the loader, and the logging is testable
+without constructing a full error. It also means a consumer who wants
+to construct a config in Python (e.g. in a test fixture) can do so
+without touching a file or the environment:
 
 ```python
 from forgeqa.config import BrowserConfig, ForgeQAConfig
@@ -919,17 +1131,31 @@ power-user path.
   the precedence design decision.
 - [`docs/adr/ADR-010`](adr/ADR-010-validate-config-fields-with-pydantic-constraints-and-a-human-readable-error-formatter.md) —
   the field-validation and error-formatter design decision.
+- [`docs/adr/ADR-011`](adr/ADR-011-make-safe-defaults-explicit-and-testable-against-the-reference-app.md) —
+  the safe-defaults design decision (bounds, reference-app coupling,
+  `browser.*` evidence flags).
+- [`docs/adr/ADR-012`](adr/ADR-012-log-every-config-error-at-error-level-with-a-stable-structured-message.md) —
+  the error-logging design decision (ERROR level, structured fields,
+  structured log extras).
 - [`docs/public-api.md`](public-api.md) — the package's public API
   contract.
 - `tests/unit/config/test_models.py` — the schema's executable
   contract (acceptance: "is this value valid?").
+- `tests/unit/config/test_defaults.py` — the defaults' executable
+  contract (one test per field).
 - `tests/unit/config/test_loader.py` — the loader's executable
   contract.
 - `tests/unit/config/test_precedence.py` — the precedence's
   executable contract.
 - `tests/unit/config/test_validation.py` — the message shape's
   executable contract ("what does the user see when it is not?").
+- `tests/unit/config/test_errors.py` — the logging's executable
+  contract (one ERROR record per construction, structured extras,
+  failure isolation).
+- `tests/integration/config/test_defaults_reference_app.py` — the
+  ATDD test that drives the reference app using only default config.
 - `src/forgeqa/config/models.py` — the schema source.
 - `src/forgeqa/config/loader.py` — the loader and precedence source.
 - `src/forgeqa/config/env.py` — the env-var mapping source.
 - `src/forgeqa/config/errors.py` — the error formatter source.
+- `src/forgeqa/config/logging.py` — the logger factory source.
