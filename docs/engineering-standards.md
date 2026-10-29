@@ -2,7 +2,7 @@
 
 > **Project Status: Pre-alpha**
 > **Version**: 0.1.0
-> **Last Updated**: 2026-10-28
+> **Last Updated**: 2026-10-29
 > **Owner**: Solo Developer
 
 ---
@@ -902,18 +902,24 @@ make verify-build
 
 ## 5. Configuration
 
-ForgeQA's configuration is split into three concerns:
+ForgeQA's configuration is split into four concerns:
 
 1. **The schema** (§5.1) — what a valid config looks like. Enforced by
    Pydantic v2 in `src/forgeqa/config/models.py`. No file I/O.
 2. **The loader** (§5.2) — how a `forgeqa.toml` file becomes a
    `ForgeQAConfig`. `src/forgeqa/config/loader.py`.
-3. **The consumer doc** (`docs/configuration.md`) — the reference for
-   every field, type, default, and validation rule.
+3. **The precedence hierarchy** (§5.3) — how CLI overrides and
+   `FORGEQA_*` environment variables layer on top of `forgeqa.toml`
+   and defaults. `src/forgeqa/config/env.py` and the precedence logic
+   in `loader.py`.
+4. **The consumer doc** (`docs/configuration.md`) — the reference for
+   every field, type, default, validation rule, and precedence
+   behaviour.
 
-The three are separate so each is testable independently: the schema
-without files, the loader without re-testing the schema, and the doc
-without either. See §5.1 and §5.2 for the contributor-facing rules and
+The four are separate so each is testable independently: the schema
+without files, the loader without re-testing the schema, the
+precedence without re-testing either, and the doc without any of them.
+See §5.1, §5.2, and §5.3 for the contributor-facing rules and
 `docs/configuration.md` for the consumer-facing reference.
 
 ### 5.1 Configuration schema conventions
@@ -991,9 +997,10 @@ contributors follow when adding or changing a config field.
 
 8. **The schema does not load files.** Loading `forgeqa.toml`
    (environment overlays, secret resolution, path expansion) is a
-   separate concern (§5.2, WBS 1.2.2). The schema is the contract;
-   the loader is the mechanism. Tests for the schema use pure-Python
-   construction; tests for the loader are separate.
+   separate concern (§5.2 and §5.3, WBS 1.2.2 and 1.2.3). The schema
+   is the contract; the loader is the mechanism. Tests for the schema
+   use pure-Python construction; tests for the loader and precedence
+   are separate.
 
 #### Verification
 
@@ -1048,7 +1055,8 @@ the schema.
 #### Rules
 
 1. **`load_config` is the whole public API.** One function, one
-   signature (`path: Path | str | None = None`), one return type
+   signature (`path: Path | str | None = None`, plus the keyword-only
+   precedence parameters documented in §5.3), one return type
    (`ForgeQAConfig`). A caller does not need to know about `tomllib`,
    `find_config_path`, or the Pydantic model.
 
@@ -1059,16 +1067,17 @@ the schema.
    defaults.
 
 3. **One exception type for all load failures.** `ForgeQAConfigError`
-   covers malformed TOML, invalid values, unreadable files, and
-   missing explicit paths. The original exception is preserved as
-   `__cause__` for debugging. The message includes the file path; for
-   syntax errors, the line/column when `tomllib` provides it.
+   covers malformed TOML, invalid values, unreadable files, missing
+   explicit paths, and (per §5.3) invalid env vars and CLI overrides.
+   The original exception is preserved as `__cause__` for debugging.
+   The message includes the file path (or env var name, or CLI key)
+   identifying the layer.
 
-4. **No caching.** Each call reads the file fresh. A developer who
-   edits `forgeqa.toml` and calls `load_config()` again sees the new
-   values. Pinned by `test_loader_does_not_cache`. Caching would
-   introduce a staleness failure mode that is worse than the ~1 ms
-   file read it would save.
+4. **No caching.** Each call reads the file (and, per §5.3, the
+   environment) fresh. A developer who edits `forgeqa.toml` and calls
+   `load_config()` again sees the new values. Pinned by
+   `test_loader_does_not_cache`. Caching would introduce a staleness
+   failure mode that is worse than the ~1 ms read it would save.
 
 5. **UTF-8 encoding explicitly.** `tomllib` requires UTF-8; the loader
    reads as UTF-8 to be deterministic on Windows (where the default
@@ -1076,20 +1085,13 @@ the schema.
    `(OSError, UnicodeDecodeError)` — both are "the file could not be
    read as UTF-8 text", which the user needs to fix.
 
-6. **No environment-variable overrides in the current version.**
-   `FORGEA_CONFIG_PATH`, `FORGEA_ENV`, and per-field overrides are
-   Phase 1 follow-ups. Adding them now would expand the loader's
-   contract without a driving acceptance criterion. When they land, the
-   ADR-008 reconsideration trigger documents the precedence order to
-   define.
-
-7. **The loader does not modify the schema.** A field added to the
+6. **The loader does not modify the schema.** A field added to the
    schema (§5.1) is automatically available to the loader via
    `ForgeQAConfig(**data)`. No loader change is needed for a new field.
    This is why the schema/loader split matters: the schema changes
    alone, and the loader inherits the change.
 
-8. **Tests use the real filesystem.** `pytest`'s `tmp_path` fixture
+7. **Tests use the real filesystem.** `pytest`'s `tmp_path` fixture
    plus `monkeypatch.chdir`. Mocking `Path.read_text` tests the mock,
    not the loader. The filesystem is the loader's input; the test
    should use it directly.
@@ -1109,15 +1111,16 @@ covers:
 | Non-functional | `test_loader_is_idempotent`, `test_loader_does_not_cache`, `test_error_message_is_deterministic` |
 
 `make verify-config` runs the whole `tests/unit/config/` directory,
-which includes both `test_models.py` (schema) and `test_loader.py`
-(loader). There is no separate `make verify-loader` — the loader is a
-part of the configuration contract, and the two test files together
-are the contract.
+which includes `test_models.py` (schema), `test_loader.py` (loader),
+and `test_precedence.py` (precedence, §5.3). There is no separate
+`make verify-loader` or `make verify-precedence` — the loader and the
+precedence hierarchy are parts of the configuration contract, and the
+three test files together are the contract.
 
 #### Running the verification
 
 ```bash
-# Fast, config-only (~50 ms + loader tests)
+# Fast, config-only (schema + loader + precedence, ~150 ms)
 make verify-config
 
 # Or directly
@@ -1134,6 +1137,151 @@ pytest tests/unit/config/ -v
 - `src/forgeqa/config/errors.py` — the `ForgeQAConfigError` source.
 - `tests/unit/config/test_loader.py` — the executable contract.
 - §5.1 "Configuration schema conventions" — the schema counterpart.
+- §5.3 "Configuration precedence conventions" — the precedence
+  counterpart.
+
+### 5.3 Configuration precedence conventions
+
+The precedence hierarchy (WBS 1.2.3, ADR-009) layers CLI overrides,
+`FORGEQA_*` environment variables, `forgeqa.toml`, and defaults into a
+single `ForgeQAConfig`. This section documents the contributor-facing
+rules for extending or changing it.
+
+The precedence layer is separate from both the schema (§5.1) and the
+loader (§5.2):
+
+- **The schema** defines what a valid config looks like.
+- **The loader** reads `forgeqa.toml` into a config.
+- **The precedence layer** reads `FORGEQA_*` env vars, applies CLI
+  overrides, validates each layer, and merges the layers.
+
+The split means each is testable in isolation: the schema without I/O,
+the loader without env/CLI, the precedence without re-testing either.
+The three test files (`test_models.py`, `test_loader.py`,
+`test_precedence.py`) together are the configuration contract.
+
+#### Rules
+
+1. **The precedence order is fixed: CLI > env > TOML > defaults.** Do
+   not add a parameter to change it. A future feature that wants to
+   flip env-over-CLI would be a semver-major breaking change and would
+   need an ADR amendment (ADR-009 Decision #1).
+
+2. **Each layer is validated independently, then merged.** The
+   `load_config` body reads each layer's dict, validates it by
+   constructing a fresh `ForgeQAConfig(**layer_dict)` (via
+   `_validate_layer`), then merges the raw dicts in precedence order
+   and constructs the final config once. This preserves two
+   properties:
+   - **Fail at your own layer.** An invalid TOML value fails before
+     the env and CLI layers are applied, even if a valid CLI override
+     would later overwrite the field. Pinned by
+     `test_invalid_lower_layer_raises_even_when_higher_layer_overrides`.
+   - **Typed sub-models.** The final `ForgeQAConfig` has proper
+     sub-model instances (`cfg.browser` is a `BrowserConfig`), not raw
+     dicts.
+
+   **Do not replace the per-layer validation with
+   `model_copy(update=...)`.** Pydantic v2's `model_copy(update=...)`
+   does not validate and does not construct sub-models from nested
+   dicts. Assigning `{"browser": {...}}` via `model_copy` sets
+   `config.browser` to the raw dict, breaking every `cfg.browser.attr`
+   access and skipping validation entirely. This was the first
+   implementation attempted; the test suite caught it with 19
+   `AttributeError` and 4 "DID NOT RAISE" failures. See ADR-009's
+   Alternatives table.
+
+3. **Adding a config field requires a decision about env-var and CLI
+   support.** A field added to a sub-model is *not* automatically
+   settable via env var — `ENV_VAR_OVERRIDES` is an explicit mapping.
+   For every new field:
+   - **If the field should be settable via env var:** add an entry to
+     `ENV_VAR_OVERRIDES` in `src/forgeqa/config/env.py` and a test in
+     `test_precedence.py`.
+   - **If the field should be settable via CLI:** nothing to add to
+     `ENV_VAR_OVERRIDES` (CLI overrides are generic), but add a test
+     in `test_precedence.py` using `cli_overrides`.
+   - **If the field should not be settable via either:** document why
+     in the ADR.
+
+   This is the "auditable surface" rule from ADR-009 Decision #3.
+   `test_env_var_overrides_mapping_is_complete_for_public_fields`
+   catches a sub-model that is entirely unrepresented, but does not
+   require every field to have an env var.
+
+4. **Unknown env vars are ignored; unknown CLI-override keys are
+   rejected.** This asymmetry is deliberate (ADR-009 Decision #4 and
+   #5). The environment is shared with other tools; a stray
+   `FORGEQA_*` var should not break the loader. A CLI caller is code;
+   a typo should fail loudly. Do not "fix" one side to match the
+   other without an ADR.
+
+5. **`read_env_overrides()` is the env-var scanning contract.**
+   Adding a new env var means editing `ENV_VAR_OVERRIDES` (the
+   mapping) and `test_precedence.py` (the test). The mapping and the
+   test are the audit trail. A generic `FORGEQA_<anything>` parser
+   was rejected (ADR-009 Alternatives); do not reintroduce one
+   without an ADR.
+
+6. **Env-var values are strings; Pydantic coerces.** `read_env_overrides`
+   returns `{"browser": {"headless": "false"}}` (string), not
+   `{"browser": {"headless": False}}` (parsed). The env-var layer does
+   not re-implement Pydantic's coercion rules; it hands raw strings to
+   Pydantic and lets the model reject invalid values. Do not add
+   type-specific parsing to `read_env_overrides` — it belongs in
+   Pydantic's field types.
+
+7. **`load_config`'s two new parameters are keyword-only.**
+   `cli_overrides` and `environ` are keyword-only (`*` in the
+   signature). A caller must write `load_config(path, environ=env)`,
+   not `load_config(path, env)`. This makes call sites explicit and
+   keeps the positional signature stable for future extension.
+
+8. **Tests use the real filesystem and explicit `environ` mappings.**
+   `pytest`'s `tmp_path` for TOML, and an explicit `environ=...` dict
+   for env vars. The tests do **not** mutate `os.environ` — a real
+   environment mutation would leak into other tests in the session.
+   Pinned by `test_env_is_not_mutated`.
+
+#### Verification
+
+`tests/unit/config/test_precedence.py` is the executable contract. It
+covers:
+
+| Category | Tests |
+| :--- | :--- |
+| Positive | `test_toml_overrides_default`, `test_env_overrides_toml`, `test_cli_overrides_env`, `test_all_four_layers`, `test_all_four_layers_different_field` |
+| Negative | `test_unknown_cli_key_is_rejected`, `test_unknown_cli_field_is_rejected`, `test_invalid_env_var_raises_with_var_name`, `test_invalid_toml_value_raises_with_path`, `test_invalid_lower_layer_raises_even_when_higher_layer_overrides` |
+| Edge | `test_env_overrides_toml_when_both_present`, `test_cli_overrides_env_when_same_as_default`, `test_unknown_env_var_is_ignored`, `test_unknown_prefix_env_var_is_ignored` |
+| Corner | `test_defaults_only_when_all_layers_empty`, `test_empty_cli_overrides_is_noop`, `test_empty_env_mapping_is_noop`, `test_read_env_overrides_multi_section` |
+| Boundary | `test_env_var_overrides_mapping_is_complete_for_public_fields`, `test_read_env_overrides_does_not_include_present_but_empty_sections` |
+| Non-functional | `test_env_is_not_mutated`, `test_loader_is_deterministic`, `test_loader_reads_env_fresh_each_call`, `test_loader_reads_toml_fresh_each_call` |
+
+#### Running the verification
+
+```bash
+# Fast, config-only (schema + loader + precedence, ~150 ms)
+make verify-config
+
+# Or directly
+pytest tests/unit/config/ -v
+
+# Only the precedence tests (~50 ms)
+pytest tests/unit/config/test_precedence.py -v
+```
+
+#### See also
+
+- [ADR-009](../adr/ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md) —
+  decision record for the precedence hierarchy.
+- `docs/configuration.md` §"Precedence" — consumer-facing reference
+  (four-layer table, worked examples, env-var naming, CLI-override
+  shape, errors, determinism).
+- `src/forgeqa/config/env.py` — the env-var mapping source.
+- `src/forgeqa/config/loader.py` — the precedence logic source.
+- `tests/unit/config/test_precedence.py` — the executable contract.
+- §5.1 "Configuration schema conventions" — the schema counterpart.
+- §5.2 "Configuration loader conventions" — the loader counterpart.
 
 ---
 
@@ -1158,7 +1306,7 @@ pytest tests/unit/config/ -v
 | `docs/architecture.md` | System context, container diagrams, dependency rules. |
 | `docs/engineering-standards.md` | This document—how to build, test, and contribute. |
 | `docs/public-api.md` | Consumer-facing contract for the ForgeQA package. |
-| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` (every field, type, default, validation rule, and loader behaviour). |
+| `docs/configuration.md` | Consumer-facing reference for `forgeqa.toml` and `FORGEQA_*` env vars (every field, type, default, validation rule, precedence behaviour, and loader behaviour). |
 | `docs/user-discovery.md` | Persona, problem statement, interview evidence. |
 | `docs/mvp-scope.md` | MVP capabilities, user journeys, exclusions. |
 | `docs/risks.md` | Technical risks and market hypotheses. |
@@ -1191,7 +1339,7 @@ Before tagging a release:
 - [ ] `make verify-build` passes (wheel/sdist content inspection; WBS 1.1.4).
 - [ ] `make verify-install` passes (clean install from wheel; WBS 1.1.5).
 - [ ] `make verify-public-api` passes (public-vs-internal contract; WBS 1.1.6).
-- [ ] `make verify-config` passes (configuration schema and loader; WBS 1.2.1, 1.2.2).
+- [ ] `make verify-config` passes (configuration schema, loader, and precedence; WBS 1.2.1, 1.2.2, 1.2.3).
 - [ ] The built `.whl` installs in a clean environment.
 - [ ] `make verify-deps` passes (WBS 1.1.3).
 - [ ] `CHANGELOG.md` is updated.
@@ -1214,3 +1362,4 @@ Before tagging a release:
 | 0.1.6 | 2026-10-28 | Solo Dev | Added §4.14 "Public vs. Internal Module Conventions" (WBS 1.1.6); documented the `EXPECTED_ALL` test-authoritative pattern and the cross-module sharing with `test_install_contract.py`; added `make verify-public-api` to the Release Checklist; cross-referenced `docs/public-api.md` and ADR-006. |
 | 0.1.7 | 2026-10-28 | Solo Dev | Added §5 "Configuration" and §5.1 "Configuration schema conventions" (WBS 1.2.1); added `make verify-config` to the Release Checklist; added `docs/configuration.md` to the Documentation Standards table; noted Pydantic's bounded bool coercion in §5.1 rule 1. |
 | 0.1.8 | 2026-10-28 | Solo Dev | Added §5.2 "Configuration loader conventions" (WBS 1.2.2); added a §5 preamble pointing at `docs/configuration.md` and the schema/loader split; added the loader to §5.1 rule 8's cross-reference; expanded the §8.2 Release Checklist entry to cover both schema and loader; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention loader behaviour. |
+| 0.1.9 | 2026-10-29 | Solo Dev | Added §5.3 "Configuration precedence conventions" (WBS 1.2.3); documented the per-layer validation rule and the `model_copy(update=...)` trap in §5.3 rule 2; expanded the §5 preamble to four concerns (schema, loader, precedence, doc); updated §5.2 rules 1, 3, 4 to cross-reference §5.3 and to reflect that the loader now covers env and CLI layers; updated §5.2 §"Verification" and §"See also" to include `test_precedence.py` and ADR-009; expanded the §8.2 Release Checklist entry to cover precedence; expanded the §7 Documentation Standards entry for `docs/configuration.md` to mention precedence behaviour. |

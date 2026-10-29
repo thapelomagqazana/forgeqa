@@ -1,27 +1,232 @@
 # ForgeQA Configuration Reference
 
-ForgeQA reads a single TOML file, `forgeqa.toml`, from the working
-directory. This document is the reference for every field, its type,
-its default, and its validation rule, plus how the loader finds and
-parses the file.
+ForgeQA resolves its configuration from four sources: CLI overrides,
+environment variables, `forgeqa.toml`, and defaults. This document is
+the reference for every field, its type, its default, and its
+validation rule, plus how the loader finds, parses, and layers those
+sources.
 
 The schema is enforced by `src/forgeqa/config/models.py` (see
 [ADR-007](adr/ADR-007-pydantic-config-hierarchy.md) for the design
 decision). The loader is `src/forgeqa/config/loader.py` (see
-[ADR-008](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) for its
-design decision). The model is a Pydantic v2 hierarchy — invalid values
-fail at parse time with a message that names the field and (for
-`Literal` fields) lists the valid values.
+[ADR-008](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) and
+[ADR-009](adr/ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md)
+for its design decisions). The model is a Pydantic v2 hierarchy —
+invalid values fail at parse time with a message that names the field
+and (for `Literal` fields) lists the valid values.
 
-**Status:** both the schema (WBS 1.2.1) and the loader (WBS 1.2.2) are
-implemented. This document describes the actual behaviour, not a
-target.
+**Status:** the schema (WBS 1.2.1), the loader (WBS 1.2.2), and the
+precedence hierarchy (WBS 1.2.3) are all implemented. This document
+describes the actual behaviour, not a target.
+
+---
+
+## Precedence
+
+ForgeQA resolves configuration from four sources. When the same setting
+is present in more than one, the higher-priority source wins:
+
+| Priority | Source | Example |
+| :--- | :--- | :--- |
+| **1** (highest) | **CLI / Pytest args** | `cli_overrides={"browser": {"headless": False}}` |
+| **2** | **Environment variables** | `FORGEQA_BROWSER_HEADLESS=false` |
+| **3** | **`forgeqa.toml`** | `[browser] headless = false` |
+| **4** (lowest) | **Defaults** | `headless: bool = True` in `BrowserConfig` |
+
+The order is fixed. There is no configuration to change it.
+
+### Why this order?
+
+- **CLI args are the most specific.** A caller who passes
+  `cli_overrides={"browser": {"headless": False}}` is explicitly
+  asking for `headless=False` for this invocation, no matter what the
+  environment or TOML says. The most specific wins.
+- **Environment variables are next.** They represent the machine or
+  the CI job. `FORGEQA_BROWSER_HEADLESS=false` is a per-machine or
+  per-job setting, more specific than `forgeqa.toml` (which is
+  per-repository) but less specific than a per-invocation CLI arg.
+- **`forgeqa.toml` is next.** It represents the project's
+  configuration, checked into the repository.
+- **Defaults are the fallback.** A new user who has not configured
+  anything gets sensible behaviour.
+
+This matches the [Twelve-Factor App](https://12factor.net/config)
+convention and the pattern used by Kubernetes, Terraform, and most
+Python test frameworks.
+
+### Worked examples
+
+**A TOML value overrides a default.**
+
+`forgeqa.toml`:
+```toml
+[browser]
+browser_name = "firefox"
+```
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config()
+assert cfg.browser.browser_name == "firefox"  # TOML, not default "chromium"
+```
+
+**An environment variable overrides a TOML value.**
+
+`forgeqa.toml`:
+```toml
+[browser]
+browser_name = "firefox"
+```
+
+Environment:
+```bash
+export FORGEQA_BROWSER_BROWSER_NAME=webkit
+```
+
+```python
+cfg = load_config()
+assert cfg.browser.browser_name == "webkit"  # env, not TOML's "firefox"
+```
+
+**A CLI override overrides an environment variable.**
+
+Environment:
+```bash
+export FORGEQA_BROWSER_BROWSER_NAME=firefox
+```
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config(cli_overrides={"browser": {"browser_name": "webkit"}})
+assert cfg.browser.browser_name == "webkit"  # CLI, not env's "firefox"
+```
+
+**All four layers, one field.**
+
+```python
+# default: "chromium", TOML: "firefox", env: "webkit", CLI: "chromium"
+# Winner: "chromium" (CLI wins, even though it equals the default).
+```
+
+### Per-field precedence
+
+Precedence is applied **per field**, not per layer. A config where
+`browser_name` comes from an environment variable and `headless` comes
+from `forgeqa.toml` is valid and common — for example, in CI you might
+set `FORGEQA_BROWSER_HEADLESS=false` for a debug run while the rest of
+the browser config comes from `forgeqa.toml`.
+
+```toml
+# forgeqa.toml
+[browser]
+browser_name = "firefox"  # overridden by env below
+headless = true  # overridden by env below
+```
+
+```bash
+export FORGEQA_BROWSER_HEADLESS=false
+```
+
+```python
+cfg = load_config(cli_overrides={"browser": {"timeout_ms": 30_000}})
+assert cfg.browser.browser_name == "firefox"  # from TOML
+assert cfg.browser.headless is False  # from env
+assert cfg.browser.timeout_ms == 30_000  # from CLI
+```
+
+### Environment variable naming
+
+Every supported environment variable is listed in
+`forgeqa.config.ENV_VAR_OVERRIDES`. The naming convention is:
+
+```
+FORGEQA_<SECTION>_<FIELD>
+```
+
+where `<SECTION>` is the TOML section (`GENERAL`, `BROWSER`, `API`,
+`DIAGNOSTICS`, `REPORTING`) and `<FIELD>` is the field name, both
+uppercased.
+
+Examples:
+
+| Environment variable | Configures | TOML equivalent |
+| :--- | :--- | :--- |
+| `FORGEQA_GENERAL_ENVIRONMENT` | `general.environment` | `[general] environment = ...` |
+| `FORGEQA_BROWSER_BROWSER_NAME` | `browser.browser_name` | `[browser] browser_name = ...` |
+| `FORGEQA_BROWSER_HEADLESS` | `browser.headless` | `[browser] headless = ...` |
+| `FORGEQA_BROWSER_TIMEOUT_MS` | `browser.timeout_ms` | `[browser] timeout_ms = ...` |
+| `FORGEQA_API_TIMEOUT_SECONDS` | `api.timeout_seconds` | `[api] timeout_seconds = ...` |
+
+Environment variable values are strings; ForgeQA parses them into the
+field's type using Pydantic's coercion rules. For example,
+`FORGEQA_BROWSER_HEADLESS=false` parses to `False`;
+`FORGEQA_BROWSER_TIMEOUT_MS=30000` parses to `30000`. See
+["Boolean coercion"](#boolean-coercion) below for the accepted string
+forms for `bool`.
+
+**Unknown `FORGEQA_*` variables are silently ignored.** The environment
+is shared with other tools; a stray `FORGEQA_*` var (a leftover from a
+shell script, a typo in a CI config) does not break the loader. A
+*known* var with an invalid value raises `ForgeQAConfigError` naming
+the var.
+
+### CLI overrides
+
+`load_config` accepts a `cli_overrides` argument. The shape is a nested
+dict matching `ForgeQAConfig`'s constructor:
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config(
+    cli_overrides={
+        "browser": {"browser_name": "webkit", "headless": False},
+        "api": {"timeout_seconds": 30},
+    },
+)
+```
+
+Only the fields present in `cli_overrides` are overridden. Other fields
+follow the usual precedence.
+
+**Unknown CLI-override keys are rejected.** A typo like
+`{"browsr": {"headless": True}}` raises `ForgeQAConfigError` with a
+message naming the offending key. This is the opposite of the env-var
+treatment (unknown env vars are ignored) and is deliberate: a CLI
+caller is code, and code typos should fail loudly.
+
+### Errors
+
+Each layer reports errors with the layer's identifying information:
+
+- **CLI override errors** name the offending key
+  (`"Invalid CLI override: ..."`).
+- **Environment variable errors** name the offending var
+  (`"Invalid value in environment variable(s) FORGEQA_BROWSER_BROWSER_NAME: ..."`).
+- **TOML errors** name the offending file
+  (`"Invalid configuration in /path/to/forgeqa.toml: ..."`).
+
+An invalid value at a *lower* layer raises even if a *higher* layer
+overrides the field. This is intentional: an invalid env var is a bug
+in the environment, and silently letting a CLI override "fix" it would
+mask the bug. To silence the error, fix or unset the offending value
+at its own layer.
+
+### Determinism
+
+Each call to `load_config` re-reads the file and re-reads the
+environment. No caching. A test that calls `load_config` twice with the
+same inputs gets equal configs; a developer who changes an env var and
+calls `load_config` again sees the new value.
 
 ---
 
 ## Loading configuration
 
-You do not read `forgeqa.toml` yourself. You call one function:
+You do not read `forgeqa.toml` yourself, and you do not scan the
+environment yourself. You call one function:
 
 ```python
 from forgeqa.config import load_config
@@ -30,10 +235,12 @@ cfg = load_config()
 ```
 
 That is the whole API. `load_config` searches the current working
-directory for `forgeqa.toml`, parses it, validates it against the
-schema, and returns a fully-defaulted `ForgeQAConfig`. If no file is
-present, it returns the default config — a fully-usable configuration
-with sensible defaults.
+directory for `forgeqa.toml`, reads `FORGEQA_*` environment variables,
+merges them in the precedence order described above (with any
+`cli_overrides` you pass at highest priority), validates the result
+against the schema, and returns a fully-defaulted `ForgeQAConfig`. If
+no file is present and no env vars are set, it returns the default
+config — a fully-usable configuration with sensible defaults.
 
 ### Search order
 
@@ -43,11 +250,29 @@ with sensible defaults.
    use defaults).
 2. Otherwise, `load_config` searches the current working directory for
    `forgeqa.toml`. If found, it is used.
-3. Otherwise, the default config is returned.
+3. Otherwise, the TOML layer is empty (defaults plus env plus CLI).
 
 The search does not walk up the directory tree. If you want a config
 file from a specific directory, pass its path explicitly. (A future
 Phase 1 feature may add upward search; it is not in this version.)
+
+### Signature
+
+```python
+def load_config(
+    path: Path | str | None = None,
+    *,
+    cli_overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> ForgeQAConfig: ...
+```
+
+- `path` — an optional explicit config file path. See "Search order".
+- `cli_overrides` — a nested dict for CLI-style overrides; highest
+  precedence. See "Precedence" §"CLI overrides".
+- `environ` — the environment mapping to read `FORGEQA_*` vars from.
+  Defaults to `os.environ`. Passing an explicit mapping is useful in
+  tests; production callers should omit it.
 
 ### Errors
 
@@ -69,14 +294,20 @@ except ForgeQAConfigError as exc:
 - **Malformed TOML.** The file exists but is not valid TOML. The
   message includes the file path and (when `tomllib` provides it) the
   line and column.
-- **Invalid values.** The file parses as TOML but does not produce a
-  valid `ForgeQAConfig` (e.g. `browser_name = "safari"`,
+- **Invalid TOML values.** The file parses as TOML but does not
+  produce a valid `ForgeQAConfig` (e.g. `browser_name = "safari"`,
   `timeout_ms = -1`, an unknown key). The message includes the file
   path and the field-level error from Pydantic.
+- **Invalid env var values.** A known `FORGEQA_*` var has a value that
+  the target field rejects. The message names the environment
+  variable.
+- **Invalid CLI overrides.** A CLI override has an unknown section or
+  field, or a value the target field rejects. The message names the
+  offending key.
 - **Missing explicit path.** You passed `path=...` and the file does
   not exist.
 - **Unreadable file.** The file exists but cannot be read (e.g.
-  permission denied).
+  permission denied, or a non-UTF-8 encoding).
 
 The original exception (`TOMLDecodeError`, `ValidationError`,
 `OSError`, or `UnicodeDecodeError`) is preserved as `exc.__cause__`
@@ -84,12 +315,11 @@ for debugging.
 
 ### Determinism
 
-Each call to `load_config` reads the file fresh. The loader does not
-cache. Two calls on the same file produce equal configs; two calls on
-a file that was edited in between produce different configs. A
-developer who edits `forgeqa.toml` and calls `load_config` again sees
-the new values. (Caching was rejected because staleness is a worse
-failure mode than a ~1 ms file read.)
+Each call to `load_config` reads the file and the environment fresh.
+The loader does not cache. Two calls with the same inputs produce equal
+configs; two calls after an edit to `forgeqa.toml` or to an env var
+produce different configs. (Caching was rejected because staleness is
+a worse failure mode than a ~1 ms file read.)
 
 ### What is not configurable (yet)
 
@@ -97,8 +327,13 @@ failure mode than a ~1 ms file read.)
   Phase 1 follow-up.
 - **Environment overlays** (`FORGEA_ENV=ci` picking
   `forgeqa.ci.toml`). Phase 1 follow-up.
-- **Per-field environment overrides** (`FORGEA_BROWSER_HEADLESS=false`).
-  Phase 1 follow-up.
+- **Configurable precedence order.** The four-layer order (CLI > env >
+  TOML > defaults) is fixed. A future feature to change it would be
+  a breaking change.
+- **Strict mode for unknown env vars.** Unknown `FORGEQA_*` vars are
+  silently ignored (see "Precedence" §"Environment variable naming").
+  A future `load_config(strict_env=True)` could raise on them
+  instead.
 - **Upward directory search.** Phase 1 follow-up.
 - **Multiple config files merged.** Phase 1 follow-up.
 
@@ -122,6 +357,22 @@ from pathlib import Path
 from forgeqa.config import load_config
 
 cfg = load_config(Path("configs/ci.toml"))
+```
+
+Add CLI overrides (highest precedence):
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config(cli_overrides={"browser": {"headless": False}})
+```
+
+Read `FORGEQA_*` env vars from a specific mapping (useful in tests):
+
+```python
+from forgeqa.config import load_config
+
+cfg = load_config(environ={"FORGEQA_BROWSER_BROWSER_NAME": "firefox"})
 ```
 
 Find the config file without loading it:
@@ -275,7 +526,8 @@ timout_ms
 When these errors occur during `load_config` (i.e. from a real
 `forgeqa.toml` file), they are wrapped in `ForgeQAConfigError` with the
 file path prepended — see [Loading configuration](#loading-configuration)
-above.
+above. An invalid env var or CLI override is likewise wrapped, with the
+env var name or CLI key in the message.
 
 The full set of validation rules is tested by
 `tests/unit/config/test_models.py` (see the "Negative cases" section
@@ -299,6 +551,34 @@ A clear error:
 
 If an error does not meet these criteria, it is a bug — open an issue
 at <https://github.com/thapelomagqazana/forgeqa/issues>.
+
+### Boolean coercion
+
+Pydantic v2 accepts a fixed set of string forms for `bool` fields,
+matching Pydantic v1's set: `"true"/"false"`, `"yes"/"no"`,
+`"on"/"off"`, and `"1"/"0"` (case-insensitive). All of these parse to
+the corresponding boolean:
+
+```toml
+[browser]
+headless = "yes"   # parses to True
+headless = "no"    # parses to False
+```
+
+Ambiguous strings like `"maybe"` fail at parse time with a clear
+error. The natural unquoted form is also accepted (and is what
+`docs/configuration.md`'s example uses):
+
+```toml
+[browser]
+headless = true
+```
+
+If a future release adopts `strict=True` on boolean fields (see
+ADR-007's reconsideration trigger), only the quoted string forms
+would be rejected; the unquoted form would continue to work. That
+change would be a minor breaking change and would be documented in
+the release notes.
 
 ---
 
@@ -430,6 +710,15 @@ bag of settings. Passing it to a fixture, a test, a reporter, and a CI
 script means all four see the same value; no consumer can accidentally
 mutate it. The `model_copy(update=...)` ceremony is the price.
 
+> **Note on `model_copy` and nested models.** When using
+> `model_copy(update=...)` on `ForgeQAConfig`, the `update` value for a
+> sub-model field must be a **model instance** (e.g.
+> `BrowserConfig(...)`), not a **dict**. Passing a dict sets the
+> attribute to the dict itself, breaking `cfg.browser.<attr>` access.
+> This is a Pydantic v2 behaviour; the loader takes a different
+> approach (constructs the merged model) to avoid it. See ADR-009's
+> Alternatives table.
+
 ---
 
 ## Whitespace stripping
@@ -478,22 +767,28 @@ public-api doc.
 
 ---
 
-## Schema and loader are separate concerns
+## Schema, loader, and precedence are separate concerns
 
-The schema and the loader are two modules with distinct responsibilities:
+The configuration is split across three modules with distinct
+responsibilities:
 
-- **The schema** (`src/forgeqa/config/models.py`, ADR-007) defines what
-  a valid config looks like. It is enforced by Pydantic v2 and tested
-  by `tests/unit/config/test_models.py`. It runs in ~50 ms and does
-  not read any files.
+- **The schema** (`src/forgeqa/config/models.py`, ADR-007) defines
+  what a valid config looks like. It is enforced by Pydantic v2 and
+  tested by `tests/unit/config/test_models.py`. It runs in ~50 ms and
+  does not read any files or environment.
 - **The loader** (`src/forgeqa/config/loader.py`, ADR-008) reads
   `forgeqa.toml`, parses it with `tomllib`, and constructs a
   `ForgeQAConfig`. Tested by `tests/unit/config/test_loader.py`.
+- **The precedence layer** (`src/forgeqa/config/env.py` and the
+  precedence logic in `loader.py`, ADR-009) reads `FORGEQA_*` env
+  vars, applies CLI overrides, and validates each layer in isolation
+  before merging. Tested by `tests/unit/config/test_precedence.py`.
 
-Splitting them means a schema change is testable without I/O, and a
-loader change is testable without re-testing the schema. It also means
-a consumer who wants to construct a config in Python (e.g. in a test
-fixture) can do so without touching a file:
+Splitting them means a schema change is testable without I/O, a loader
+change is testable without re-testing the schema, and the precedence
+change is testable without re-testing either. It also means a consumer
+who wants to construct a config in Python (e.g. in a test fixture) can
+do so without touching a file or the environment:
 
 ```python
 from forgeqa.config import BrowserConfig, ForgeQAConfig
@@ -502,12 +797,14 @@ from forgeqa.config import BrowserConfig, ForgeQAConfig
 cfg = ForgeQAConfig(browser=BrowserConfig(browser_name="firefox"))
 ```
 
-A consumer who wants to load from a file uses `load_config`:
+A consumer who wants to load from a file (and/or env) uses
+`load_config`:
 
 ```python
 from forgeqa.config import load_config
 
-# Reads forgeqa.toml from cwd (or returns defaults if absent).
+# Reads forgeqa.toml from cwd and FORGEQA_* env vars, or returns
+# defaults if neither is present.
 cfg = load_config()
 ```
 
@@ -520,16 +817,23 @@ power-user path.
 ## See also
 
 - [`docs/engineering-standards.md`](engineering-standards.md) §5.1 —
-  contributor-facing Pydantic and loader conventions.
+  contributor-facing Pydantic conventions.
+- [`docs/engineering-standards.md`](engineering-standards.md) §5.2 —
+  contributor-facing loader and precedence conventions.
 - [`docs/adr/ADR-007`](adr/ADR-007-pydantic-config-hierarchy.md) —
   the schema design decision.
 - [`docs/adr/ADR-008`](adr/ADR-008-load-forgeqa-toml-into-forgeqaconfig.md) —
   the loader design decision.
+- [`docs/adr/ADR-009`](adr/ADR-009-resolve-configuration-precedence-as-cli-args-environment-variables-forgeqa-toml-defaults.md) —
+  the precedence design decision.
 - [`docs/public-api.md`](public-api.md) — the package's public API
   contract.
 - `tests/unit/config/test_models.py` — the schema's executable
   contract.
 - `tests/unit/config/test_loader.py` — the loader's executable
   contract.
+- `tests/unit/config/test_precedence.py` — the precedence's
+  executable contract.
 - `src/forgeqa/config/models.py` — the schema source.
-- `src/forgeqa/config/loader.py` — the loader source.
+- `src/forgeqa/config/loader.py` — the loader and precedence source.
+- `src/forgeqa/config/env.py` — the env-var mapping source.
