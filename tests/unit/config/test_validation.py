@@ -17,6 +17,25 @@ the assertions here are about the *message*, not the *acceptance*.
 ``test_models.py`` covers "is this value valid?"; this file covers
 "what does the user see when it is not?".
 
+**Relation to ADR-011 (WBS 1.2.5).** The ``browser.timeout_ms`` lower
+bound was relaxed from ``100`` to ``1`` in WBS 1.2.5, because that
+WBS's boundary test requires ``timeout_ms=1`` to be legal. As a
+consequence:
+
+* The formatted error message now says ``"between 1 and 60000"``, not
+  ``"between 100 and 60000"``.
+* Values ``50`` and ``99`` are now legal — the tests that used them as
+  "invalid" examples have been updated to use ``0`` or ``-1`` (which
+  are still invalid).
+* Every test in this file that used ``timeout_ms=50`` as a "this must
+  raise" input now uses ``timeout_ms=0``, which has the same shape
+  (below the lower bound) but is actually invalid under the new
+  bound.
+
+The ``api.timeout_seconds`` lower bound was **not** relaxed — it is
+still ``1``, and values ``0``, ``-1``, ``301``, ``1000`` are still
+rejected. See ADR-011 §Decision #5.
+
 Run only these tests:
 
     pytest tests/unit/config/test_validation.py -v
@@ -82,19 +101,25 @@ def _assert_clean(message: str) -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        99,  # boundary-1 (below minimum)
-        50,  # well below
-        0,  # zero
+        0,  # zero — the *only* small-integer invalid value now (lower bound is 1)
         -1,  # negative
+        -10_000,  # well negative
         60_001,  # boundary+1 (above maximum)
         100_000,  # well above
     ],
 )
 def test_invalid_timeout_ms_rejected_with_range(value: int) -> None:
-    """Given a ``timeout_ms`` outside [100, 60000], when constructing ``BrowserConfig``, then it raises ``ValidationError``.
+    """Given a ``timeout_ms`` outside [1, 60000], when constructing ``BrowserConfig``, then it raises ``ValidationError``.
 
     The error's ``msg`` and the formatted message must mention the
     field, the valid range, and the offending value.
+
+    **Range note.** The lower bound was relaxed from ``100`` to ``1``
+    in WBS 1.2.5 / ADR-011 §Decision #5. Values ``50`` and ``99``,
+    which the pre-1.2.5 version of this test treated as invalid, are
+    now legal — they are covered by
+    :func:`test_valid_timeout_ms_accepted` with the new boundaries.
+    Only ``0`` and negatives are rejected below the lower bound.
     """
     with pytest.raises(ValidationError) as exc_info:
         BrowserConfig(timeout_ms=value)
@@ -104,17 +129,21 @@ def test_invalid_timeout_ms_rejected_with_range(value: int) -> None:
     # The formatted message names the range and the value.
     formatted = format_validation_error(exc_info.value, layer="TOML", path="forgeqa.toml")
     assert "timeout_ms" in formatted
-    assert "between 100 and 60000" in formatted
+    # Range string changed 100→1 in WBS 1.2.5 (see ADR-011 §Decision #5).
+    assert "between 1 and 60000" in formatted
     assert str(value) in formatted
     _assert_clean(formatted)
 
 
-@pytest.mark.parametrize("value", [100, 10_000, 60_000])
+@pytest.mark.parametrize("value", [1, 99, 100, 10_000, 60_000])
 def test_valid_timeout_ms_accepted(value: int) -> None:
-    """Given a ``timeout_ms`` inside [100, 60000], when constructing ``BrowserConfig``, then it succeeds.
+    """Given a ``timeout_ms`` inside [1, 60000], when constructing ``BrowserConfig``, then it succeeds.
 
-    Boundary values (100 and 60_000) are included; the field is
-    inclusive on both bounds.
+    Boundary values (``1`` and ``60_000``) are included; the field is
+    inclusive on both bounds. ``99`` and ``100`` are included
+    explicitly because ``99`` was *rejected* under the pre-1.2.5
+    ``ge=100`` bound and is now legal — this test pins the relaxation
+    (see ADR-011 §Consequences, Neutral).
     """
     cfg = BrowserConfig(timeout_ms=value)
     assert cfg.timeout_ms == value
@@ -129,7 +158,9 @@ def test_valid_timeout_ms_accepted(value: int) -> None:
 def test_invalid_timeout_seconds_rejected(value: int) -> None:
     """Given a ``timeout_seconds`` outside [1, 300], when constructing ``APIConfig``, then it raises ``ValidationError``.
 
-    The formatted message names the field and the range.
+    The formatted message names the field and the range. The bounds
+    are unchanged from WBS 1.2.4 (only ``browser.timeout_ms`` was
+    relaxed in WBS 1.2.5).
     """
     with pytest.raises(ValidationError) as exc_info:
         APIConfig(timeout_seconds=value)
@@ -264,8 +295,13 @@ def test_loader_wraps_timeout_error_without_traceback(tmp_path, monkeypatch) -> 
     clear error mentioning the field and valid range" and "The error
     message does not expose internal Pydantic tracebacks", end-to-end
     through the loader.
+
+    **Invalid value note.** Uses ``timeout_ms = 0`` (below the
+    ``ge=1`` lower bound). The pre-1.2.5 version used ``50``, which is
+    now legal (see ADR-011 §Decision #5) and therefore would not
+    raise.
     """
-    (tmp_path / "forgeqa.toml").write_text("[browser]\ntimeout_ms = 50\n", encoding="utf-8")
+    (tmp_path / "forgeqa.toml").write_text("[browser]\ntimeout_ms = 0\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ForgeQAConfigError) as exc_info:
@@ -273,8 +309,9 @@ def test_loader_wraps_timeout_error_without_traceback(tmp_path, monkeypatch) -> 
 
     message = str(exc_info.value)
     assert "browser.timeout_ms" in message
-    assert "between 100 and 60000" in message
-    assert "50" in message
+    # Range string changed 100→1 in WBS 1.2.5.
+    assert "between 1 and 60000" in message
+    assert "0" in message
     _assert_clean(message)
 
 
@@ -314,31 +351,42 @@ def test_loader_wraps_artifacts_dir_error_without_traceback(tmp_path, monkeypatc
 
 
 def test_env_var_error_has_no_traceback(tmp_path, monkeypatch) -> None:
-    """Given an invalid ``timeout_ms`` env var, when loaded, then the error names the var, the range, and has no traceback."""
+    """Given an invalid ``timeout_ms`` env var, when loaded, then the error names the var, the range, and has no traceback.
+
+    **Invalid value note.** Uses ``"0"`` (below the ``ge=1`` lower
+    bound). The pre-1.2.5 version used ``"50"``, which is now legal.
+    """
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ForgeQAConfigError) as exc_info:
-        load_config(environ={"FORGEQA_BROWSER_TIMEOUT_MS": "50"})
+        load_config(environ={"FORGEQA_BROWSER_TIMEOUT_MS": "0"})
 
     message = str(exc_info.value)
     assert "FORGEQA_BROWSER_TIMEOUT_MS" in message
-    assert "between 100 and 60000" in message
+    # Range string changed 100→1 in WBS 1.2.5.
+    assert "between 1 and 60000" in message
     _assert_clean(message)
 
 
 def test_cli_override_error_has_no_traceback(tmp_path, monkeypatch) -> None:
-    """Given an invalid CLI override, when loaded, then the error names the field, the range, and has no traceback."""
+    """Given an invalid CLI override, when loaded, then the error names the field, the range, and has no traceback.
+
+    **Invalid value note.** Uses ``timeout_ms=0`` (below the ``ge=1``
+    lower bound). The pre-1.2.5 version used ``50``, which is now
+    legal.
+    """
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ForgeQAConfigError) as exc_info:
         load_config(
             environ={},
-            cli_overrides={"browser": {"timeout_ms": 50}},
+            cli_overrides={"browser": {"timeout_ms": 0}},
         )
 
     message = str(exc_info.value)
     assert "browser.timeout_ms" in message
-    assert "between 100 and 60000" in message
+    # Range string changed 100→1 in WBS 1.2.5.
+    assert "between 1 and 60000" in message
     _assert_clean(message)
 
 
@@ -348,9 +396,17 @@ def test_cli_override_error_has_no_traceback(tmp_path, monkeypatch) -> None:
 
 
 def test_format_validation_error_toml_layer() -> None:
-    """Given a ``ValidationError`` and ``layer="TOML"``, then the message starts with ``"Invalid configuration in <path>:"``."""
+    """Given a ``ValidationError`` and ``layer="TOML"``, then the message starts with ``"Invalid configuration in <path>:"``.
+
+    **Invalid value note.** Uses ``timeout_ms=0`` so the ``try`` body
+    actually raises. The pre-1.2.5 version used ``50``, which is now
+    legal and therefore does not raise — which caused the previous
+    version of this test to fail with ``UnboundLocalError`` (the
+    ``except`` block never ran, so the local ``message`` was never
+    assigned).
+    """
     try:
-        BrowserConfig(timeout_ms=50)
+        BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
         message = format_validation_error(exc, layer="TOML", path="/p/forgeqa.toml")
     assert message.startswith("Invalid configuration in /p/forgeqa.toml: ")
@@ -358,18 +414,28 @@ def test_format_validation_error_toml_layer() -> None:
 
 
 def test_format_validation_error_env_layer() -> None:
-    """Given a ``ValidationError`` and ``layer="environment variable"``, then the message starts with ``"Invalid environment variable:"``."""
+    """Given a ``ValidationError`` and ``layer="environment variable"``, then the message starts with ``"Invalid environment variable:"``.
+
+    **Invalid value note.** Uses ``timeout_ms=0`` (still invalid under
+    the ``ge=1`` lower bound). The pre-1.2.5 version used ``50``, which
+    is now legal and would not raise.
+    """
     try:
-        BrowserConfig(timeout_ms=50)
+        BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
         message = format_validation_error(exc, layer="environment variable")
     assert message.startswith("Invalid environment variable: ")
 
 
 def test_format_validation_error_cli_layer() -> None:
-    """Given a ``ValidationError`` and ``layer="CLI override"``, then the message starts with ``"Invalid CLI override:"``."""
+    """Given a ``ValidationError`` and ``layer="CLI override"``, then the message starts with ``"Invalid CLI override:"``.
+
+    **Invalid value note.** Uses ``timeout_ms=0`` (still invalid under
+    the ``ge=1`` lower bound). The pre-1.2.5 version used ``50``, which
+    is now legal and would not raise.
+    """
     try:
-        BrowserConfig(timeout_ms=50)
+        BrowserConfig(timeout_ms=0)
     except ValidationError as exc:
         message = format_validation_error(exc, layer="CLI override")
     assert message.startswith("Invalid CLI override: ")
@@ -381,10 +447,16 @@ def test_format_validation_error_with_multiple_errors() -> None:
     A full multi-line list is a follow-up (ADR-010 reconsideration
     trigger); the single-line form with the "and N more" suffix is
     what a user sees today.
+
+    **Invalid value note.** Uses ``timeout_ms=0`` (still invalid) so
+    two errors are produced. The pre-1.2.5 version used ``timeout_ms=50``,
+    which is now legal — that produced only one error
+    (``api.timeout_seconds``), so the ``"(and 1 more)"`` suffix was
+    never present.
     """
     try:
         ForgeQAConfig(
-            browser={"timeout_ms": 50},
+            browser={"timeout_ms": 0},
             api={"timeout_seconds": 999},
         )
     except ValidationError as exc:

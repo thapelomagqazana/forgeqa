@@ -103,6 +103,15 @@ def test_loads_valid_config(tmp_path, monkeypatch) -> None:
     the config correctly". Uses the real filesystem (``tmp_path``) and
     ``monkeypatch.chdir`` to control the working directory — the loader
     reads ``Path.cwd()``, so the test must control that.
+
+    Failure-evidence fields (``screenshot_on_failure``,
+    ``trace_on_failure``) live on ``[browser]``, not ``[diagnostics]``
+    — they moved there in WBS 1.2.5 / ADR-011 §Decision #3. The
+    ``DiagnosticsConfig`` sub-model now only carries ``console_logs``
+    (non-browser diagnostic capture); the ``[diagnostics] screenshots``
+    and ``[diagnostics] traces`` keys that used to live here were
+    removed, and ``extra="forbid"`` on the models makes them a hard
+    error, not a silent no-op.
     """
     write_toml(
         tmp_path,
@@ -115,12 +124,11 @@ def test_loads_valid_config(tmp_path, monkeypatch) -> None:
         browser_name = "firefox"
         headless = false
         timeout_ms = 30000
+        screenshot_on_failure = false
+        trace_on_failure = false
 
         [api]
         timeout_seconds = 30
-
-        [diagnostics]
-        screenshots = false
 
         [reporting]
         json_report = false
@@ -134,8 +142,9 @@ def test_loads_valid_config(tmp_path, monkeypatch) -> None:
     assert cfg.browser.browser_name == "firefox"
     assert cfg.browser.headless is False
     assert cfg.browser.timeout_ms == 30_000
+    assert cfg.browser.screenshot_on_failure is False
+    assert cfg.browser.trace_on_failure is False
     assert cfg.api.timeout_seconds == 30
-    assert cfg.diagnostics.screenshots is False
     assert cfg.reporting.json_report is False
 
 

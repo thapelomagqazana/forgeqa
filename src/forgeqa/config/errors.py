@@ -18,12 +18,21 @@ preserves the original exception for debugging.
 **Error messages are user-facing, not developer-facing.** The message a
 user sees is a single line: it names the failing layer (file path, env
 var, or CLI override), the field path (``browser.timeout_ms``), the
-constraint (``must be between 100 and 60000``), and the offending value
-(``got 50``). It does **not** include Pydantic's raw
+constraint (``must be between 1 and 60000``), and the offending value
+(``got 0``). It does **not** include Pydantic's raw
 ``pydantic_core._pydantic_core.ValidationError:`` traceback line, its
 internal ``[type=..., input_value=..., input_type=...]`` annotations, or
 any multi-line traceback. See ADR-010 for the rationale and
 ``docs/configuration.md`` §"Validation" for the message shapes.
+
+**Range note (WBS 1.2.5 / ADR-011).** ``browser.timeout_ms``'s lower
+bound was relaxed from ``100`` to ``1`` in WBS 1.2.5 (the WBS boundary
+test requires ``timeout_ms=1`` to be legal). The formatter is data-
+driven: it reads the bounds from the model's JSON schema, so it
+naturally emits the current bound (``"between 1 and 60000"``) without a
+code change. The docstrings and examples below were updated to match.
+``api.timeout_seconds`` was **not** relaxed — its bound is still
+``[1, 300]``. See ADR-011 §Decision #5.
 
 The formatting is done by :func:`format_validation_error` in this
 module. It is a pure function (no I/O, no persistent state) so it can be
@@ -31,9 +40,9 @@ tested in isolation and reused by consumers who build their own configs.
 
 **Why the formatter consults the model schema.** Pydantic v2 emits one
 error per violated bound, and each error's ``ctx`` carries only *that*
-bound. So a single error from ``Annotated[int, Field(ge=100, le=60_000)]``
-is either ``{"type": "greater_than_equal", "ctx": {"ge": 100}}`` (when
-the value is below 100) or ``{"type": "less_than_equal", "ctx": {"le":
+bound. So a single error from ``Annotated[int, Field(ge=1, le=60_000)]``
+is either ``{"type": "greater_than_equal", "ctx": {"ge": 1}}`` (when
+the value is below 1) or ``{"type": "less_than_equal", "ctx": {"le":
 60_000}}`` (when it is above 60_000) — never both. To render the
 combined ``"must be between X and Y"`` form that the ADR and the docs
 promise, :func:`_declared_bounds_for` looks up the *other* bound from
@@ -62,12 +71,12 @@ class ForgeQAConfigError(Exception):
       line/column when available.
     * **Semantically invalid config.** The file parses as TOML but does
       not produce a valid :class:`~forgeqa.config.ForgeQAConfig` (e.g.
-      ``browser_name = "safari"``, ``timeout_ms = 50``, an unknown
+      ``browser_name = "safari"``, ``timeout_ms = 0``, an unknown
       key). The underlying :class:`pydantic.ValidationError` is
       preserved as ``__cause__``; the ``str(error)`` includes the
       file path and a **human-readable** description of the field, the
       constraint, and the offending value (e.g.
-      ``"browser.timeout_ms must be between 100 and 60000, got 50"``).
+      ``"browser.timeout_ms must be between 1 and 60000, got 0"``).
       It does **not** include Pydantic's raw error or a traceback.
     * **Invalid environment variable or CLI override.** Same as the
       TOML case, but the message names the env var (or the CLI layer)
@@ -120,9 +129,9 @@ def _format_loc(loc: tuple[Any, ...]) -> str:
     str
         - ``"section.field"`` when ``loc`` has ≥ 2 elements (a
           sub-model field, e.g. from
-          ``ForgeQAConfig(browser={"timeout_ms": 50})``).
+          ``ForgeQAConfig(browser={"timeout_ms": 0})``).
         - ``"field"`` when ``loc`` has exactly 1 element (a direct
-          sub-model construction, e.g. ``BrowserConfig(timeout_ms=50)``).
+          sub-model construction, e.g. ``BrowserConfig(timeout_ms=0)``).
         - ``"<root>"`` when ``loc`` is empty.
 
     Notes
@@ -144,7 +153,7 @@ def _declared_bounds_for(loc: tuple[Any, ...]) -> tuple[Any, Any] | None:
 
     Pydantic v2 emits one error per violated bound, and each error's
     ``ctx`` carries only that bound. So a single error from
-    ``Annotated[int, Field(ge=100, le=60_000)]`` never carries both
+    ``Annotated[int, Field(ge=1, le=60_000)]`` never carries both
     ends. To render the combined ``"must be between X and Y"`` form
     that the ADR (Decision #5) and ``docs/configuration.md``
     §"Validation" promise, the formatter looks up the *other* bound
@@ -167,7 +176,7 @@ def _declared_bounds_for(loc: tuple[Any, ...]) -> tuple[Any, Any] | None:
     The function handles two ``loc`` shapes:
 
     - **Length 1** (``("timeout_ms",)``): the caller constructed the
-      sub-model directly (``BrowserConfig(timeout_ms=50)``). The field
+      sub-model directly (``BrowserConfig(timeout_ms=0)``). The field
       name is looked up in *every* sub-model's properties; the first
       match wins. ForgeQA's field names are unique across sub-models
       today, so the lookup is unambiguous.
@@ -268,10 +277,17 @@ def _format_error(
     str
         A single-line description. Examples:
 
-        - ``"timeout_ms must be between 100 and 60000, got 50"``
+        - ``"timeout_ms must be between 1 and 60000, got 0"``
         - ``"browser_name must be one of: 'chromium', 'firefox' or 'webkit'; got 'safari'"``
         - ``"artifacts_dir must be a creatable directory: parent /nope does not exist"``
         - ``"unexpected field: timout_ms"``
+
+        The ``1`` in the first example is the current lower bound per
+        WBS 1.2.5 / ADR-011 §Decision #5; it was ``100`` before that
+        change. The formatter reads the bound from the schema, so no
+        code change is required to keep this docstring honest across
+        a future bound change — but the example is worth updating
+        when the bound changes, so a reader is not surprised.
 
     Notes
     -----
@@ -390,11 +406,13 @@ def format_validation_error(
     Returns
     -------
     str
-        A single-line message. Examples:
+        A single-line message. Examples (bounds shown are the
+        WBS 1.2.5 / ADR-011 values; ``browser.timeout_ms`` uses
+        ``[1, 60_000]``, ``api.timeout_seconds`` uses ``[1, 300]``):
 
-        - TOML: ``"Invalid configuration in /path/to/forgeqa.toml: browser.timeout_ms must be between 100 and 60000, got 50"``
-        - Env:  ``"Invalid environment variable: browser.timeout_ms must be between 100 and 60000, got 50"``
-        - CLI:  ``"Invalid CLI override: browser.timeout_ms must be between 100 and 60000, got 50"``
+        - TOML: ``"Invalid configuration in /path/to/forgeqa.toml: browser.timeout_ms must be between 1 and 60000, got 0"``
+        - Env:  ``"Invalid environment variable: browser.timeout_ms must be between 1 and 60000, got 0"``
+        - CLI:  ``"Invalid CLI override: browser.timeout_ms must be between 1 and 60000, got 0"``
 
         **No Pydantic traceback is included.** The message is a single
         line, ends with the offending value, and names the field path
@@ -428,6 +446,17 @@ def format_validation_error(
     For length-1 locs (direct sub-model construction) the section is
     unknown, and the message reads ``"timeout_ms must be ..."`` — no
     duplication.
+
+    **Total-function guarantee.** The ``message`` local is initialised
+    to a safe default *before* the ``try``-equivalent branches below,
+    so the function returns a string for any ``ValidationError`` and
+    never raises ``UnboundLocalError``. This matters for two reasons:
+    (a) a caller who passes a ``ValidationError`` whose ``errors()``
+    list is empty still gets a meaningful message; (b) a future
+    refactor that restructures the branch logic cannot accidentally
+    introduce a code path where the local is unassigned. The cost is
+    one extra assignment per call; the benefit is a formatter that is
+    safe to call from anywhere.
     """
     errors = exc.errors()
     if not errors:
@@ -446,9 +475,18 @@ def format_validation_error(
     # Ternary rather than if/else to satisfy ruff SIM108.
     prefix = _format_loc(loc) + " " if len(loc) >= 2 else ""
 
+    # `message` is initialised before the branches so the function is
+    # total (see "Total-function guarantee" above). Each branch below
+    # overrides it; the default is only returned if a future refactor
+    # adds a branch that forgets to assign.
+    message = f"Invalid configuration ({layer}): {prefix}{detail}{extra}"
+
     if layer == "TOML":
         path_part = path if path is not None else "(unknown path)"
-        return f"Invalid configuration in {path_part}: {prefix}{detail}{extra}"
-    if layer == "environment variable":
-        return f"Invalid environment variable: {prefix}{detail}{extra}"
-    return f"Invalid CLI override: {prefix}{detail}{extra}"
+        message = f"Invalid configuration in {path_part}: {prefix}{detail}{extra}"
+    elif layer == "environment variable":
+        message = f"Invalid environment variable: {prefix}{detail}{extra}"
+    else:
+        message = f"Invalid CLI override: {prefix}{detail}{extra}"
+
+    return message
